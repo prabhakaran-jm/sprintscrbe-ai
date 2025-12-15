@@ -1,0 +1,26 @@
+modules:
+  macro:
+    - key: sprintscribe-ai-confluence-custom-ui-custom-config-macro
+      resource: main
+      resolver:
+        function: resolver
+      title: SprintScribe AI
+      description: Inserts a custom config macro for custom UI
+      config:
+        resource: macro-config
+        viewportSize: max
+        title: Config
+  function:
+    - key: resolver
+      handler: index.handler
+resources:
+  - key: main
+    path: static/hello-world/build
+  - key: macro-config
+    path: static/config/build
+app:
+  runtime:
+    name: nodejs24.x
+    memoryMB: 256
+    architecture: arm64
+  id: ari:cloud:ecosystem::app/f4a6cbb3-b747-4aec-b087-90ad89be200b
