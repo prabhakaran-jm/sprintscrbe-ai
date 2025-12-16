@@ -22,12 +22,23 @@ function App() {
   const [selectedActionItems, setSelectedActionItems] = useState([]);
   // Created issues
   const [createdIssues, setCreatedIssues] = useState([]);
+  // Meeting state
+  const [meeting, setMeeting] = useState({
+    transcriptText: '',
+    summary: '',
+    createdIssueKeys: [],
+    updatedAt: null
+  });
+  // Summary (parsed from meeting.summary)
+  const [summary, setSummary] = useState(null);
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
   // Analyzing state
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   // Creating issues state
   const [isCreatingIssues, setIsCreatingIssues] = useState(false);
+  // Generating summary state
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   // Error state
   const [error, setError] = useState(null);
   // Debug info
@@ -52,36 +63,85 @@ function App() {
         if (contentIdValue) {
           setContentId(contentIdValue);
           
-          // Load session state (per-page)
-          const sessionResult = await invoke('getSessionState', { contentId: contentIdValue });
-          if (sessionResult && sessionResult.status) {
-            setSessionStatus(sessionResult.status);
+          // Initialize variables for debug info
+          let sessionResult = null;
+          let analysisResult = null;
+          
+          // Load session state (per-page) - wrap in try-catch for resilience
+          try {
+            sessionResult = await invoke('getSessionState', { contentId: contentIdValue });
+            if (sessionResult && sessionResult.status) {
+              setSessionStatus(sessionResult.status);
+            }
+          } catch (sessionError) {
+            console.warn('Error loading session state:', sessionError);
+            // Continue with default IDLE state
           }
           
-          // Load analysis
-          const analysisResult = await invoke('getAnalysis', { contentId: contentIdValue });
-          if (analysisResult) {
-            setAnalysis({
-              suggestions: analysisResult.suggestions || [],
-              decisions: analysisResult.decisions || [],
-              actionItems: analysisResult.actionItems || []
-            });
-            // Initialize selected action items (all checked by default)
-            setSelectedActionItems(
-              (analysisResult.actionItems || []).map((item, index) => ({
-                index,
-                text: item,
-                selected: true,
-                owner: '',
-                dueDate: ''
-              }))
-            );
+          // Load meeting state - wrap in try-catch for resilience
+          try {
+            const meetingResult = await invoke('getMeeting', { contentId: contentIdValue });
+            if (meetingResult) {
+              setMeeting(meetingResult);
+              // Hydrate transcript text from meeting state (this happens during initial load)
+              if (meetingResult.transcriptText) {
+                // Set transcript text - this will be ignored by debounced save due to isInitialLoad flag
+                setTranscriptText(meetingResult.transcriptText);
+              }
+              // Parse and set summary if available
+              if (meetingResult.summary) {
+                try {
+                  const parsedSummary = typeof meetingResult.summary === 'string' 
+                    ? JSON.parse(meetingResult.summary) 
+                    : meetingResult.summary;
+                  setSummary(parsedSummary);
+                } catch (e) {
+                  console.warn('Failed to parse summary:', e);
+                }
+              }
+            }
+          } catch (meetingError) {
+            console.warn('Error loading meeting state:', meetingError);
+            // Continue without meeting data
           }
           
-          // Load created issues
-          const createdIssuesResult = await invoke('getCreatedIssues', { contentId: contentIdValue });
-          if (createdIssuesResult) {
-            setCreatedIssues(createdIssuesResult);
+          // Mark initial load as complete after all data is loaded
+          setIsInitialLoad(false);
+          
+          // Load analysis - wrap in try-catch for resilience
+          try {
+            analysisResult = await invoke('getAnalysis', { contentId: contentIdValue });
+            if (analysisResult) {
+              setAnalysis({
+                suggestions: analysisResult.suggestions || [],
+                decisions: analysisResult.decisions || [],
+                actionItems: analysisResult.actionItems || []
+              });
+              // Initialize selected action items (all checked by default)
+              setSelectedActionItems(
+                (analysisResult.actionItems || []).map((item, index) => ({
+                  index,
+                  text: item,
+                  selected: true,
+                  owner: '',
+                  dueDate: ''
+                }))
+              );
+            }
+          } catch (analysisError) {
+            console.warn('Error loading analysis:', analysisError);
+            // Continue without analysis data
+          }
+          
+          // Load created issues - wrap in try-catch for resilience
+          try {
+            const createdIssuesResult = await invoke('getCreatedIssues', { contentId: contentIdValue });
+            if (createdIssuesResult) {
+              setCreatedIssues(createdIssuesResult);
+            }
+          } catch (issuesError) {
+            console.warn('Error loading created issues:', issuesError);
+            // Continue without created issues
           }
           
           // Load Jira projects
@@ -119,11 +179,23 @@ function App() {
         }
       } catch (err) {
         console.error('Error loading initial data:', err);
-        setError(`Failed to load data: ${err.message || err}`);
+        // Check if it's a tunnel/network error
+        const errorMessage = err.message || String(err);
+        const isNetworkError = errorMessage.includes('ERR_CANNOT_FORWARD') || 
+                              errorMessage.includes('tunnel') || 
+                              errorMessage.includes('squid') ||
+                              errorMessage.includes('DOCTYPE HTML');
+        
+        if (isNetworkError) {
+          setError('Network connection issue. Please check your tunnel connection and try again. If using forge tunnel, ensure it is running.');
+        } else {
+          setError(`Failed to load data: ${errorMessage}`);
+        }
+        
         setDebugInfo(prev => ({
           ...prev,
           lastAction: 'loadInitialData',
-          lastError: err.message || String(err)
+          lastError: errorMessage
         }));
       } finally {
         setIsLoading(false);
@@ -290,6 +362,90 @@ function App() {
     );
   };
 
+  // Track if this is the initial load to prevent auto-save on hydration
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+
+  // Debounced save transcript (500ms delay)
+  useEffect(() => {
+    // Skip auto-save on initial load (when transcript is hydrated from storage)
+    if (isInitialLoad) {
+      return;
+    }
+
+    if (!contentId || sessionStatus !== 'RUNNING' || !transcriptText) {
+      return;
+    }
+
+    // Simple debounce implementation
+    const timeoutId = setTimeout(async () => {
+      if (transcriptText !== undefined && transcriptText.trim()) {
+        try {
+          await invoke('saveTranscript', { contentId, transcriptText });
+          // Update meeting state
+          setMeeting(prev => ({
+            ...prev,
+            transcriptText,
+            updatedAt: new Date().toISOString()
+          }));
+        } catch (err) {
+          console.error('Error saving transcript:', err);
+          // Don't show error to user for background saves
+        }
+      }
+    }, 500);
+
+    return () => clearTimeout(timeoutId);
+  }, [transcriptText, contentId, sessionStatus, isInitialLoad]);
+
+  // Handler to generate summary
+  const handleGenerateSummary = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
+    if (!transcriptText || !transcriptText.trim()) {
+      setError('Please enter transcript text');
+      return;
+    }
+
+    setIsGeneratingSummary(true);
+    setError(null);
+
+    try {
+      const result = await invoke('generateSummary', {
+        contentId,
+        transcriptText: transcriptText.trim()
+      });
+
+      if (result) {
+        setSummary(result);
+        // Update meeting state
+        setMeeting(prev => ({
+          ...prev,
+          summary: JSON.stringify(result),
+          updatedAt: new Date().toISOString()
+        }));
+        setDebugInfo(prev => ({
+          ...prev,
+          lastAction: 'generateSummary',
+          lastResult: result,
+          lastError: null
+        }));
+      }
+    } catch (err) {
+      console.error('Error generating summary:', err);
+      setError(`Failed to generate summary: ${err.message || err}`);
+      setDebugInfo(prev => ({
+        ...prev,
+        lastAction: 'generateSummary',
+        lastError: err.message || String(err)
+      }));
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  };
+
   // Handler to create Jira issues
   const handleCreateJiraIssues = async () => {
     if (!contentId) {
@@ -327,6 +483,22 @@ function App() {
       if (result && Array.isArray(result)) {
         // Update created issues list
         setCreatedIssues(prev => [...prev, ...result]);
+        
+        // Save created issue keys to meeting state
+        const issueKeys = result.map(issue => issue.key || issue);
+        try {
+          await invoke('saveCreatedIssues', { contentId, issueKeys });
+          // Update meeting state
+          setMeeting(prev => ({
+            ...prev,
+            createdIssueKeys: [...(prev.createdIssueKeys || []), ...issueKeys],
+            updatedAt: new Date().toISOString()
+          }));
+        } catch (saveError) {
+          console.error('Error saving created issues:', saveError);
+          // Don't fail the whole operation if save fails
+        }
+        
         setDebugInfo(prev => ({
           ...prev,
           lastAction: 'createJiraIssuesFromActionItems',
@@ -558,6 +730,8 @@ function App() {
         }}>
           <div style={{ fontWeight: '600', marginBottom: '8px' }}>Debug Info:</div>
           <div><strong>Content ID:</strong> {contentId || 'Not available'}</div>
+          <div><strong>Meeting Updated:</strong> {meeting.updatedAt ? new Date(meeting.updatedAt).toLocaleString() : 'Never'}</div>
+          <div><strong>Created Issue Keys:</strong> {meeting.createdIssueKeys ? meeting.createdIssueKeys.length : 0}</div>
           <div><strong>Last Action:</strong> {debugInfo.lastAction || 'None'}</div>
           {debugInfo.lastResult && (
             <div style={{ marginTop: '4px' }}>
@@ -572,6 +746,69 @@ function App() {
               <strong>Last Error:</strong> {debugInfo.lastError}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Meeting Summary Panel */}
+      {summary && (
+        <div style={{
+          marginBottom: '16px',
+          border: '1px solid #DFE1E6',
+          borderRadius: '3px',
+          padding: '16px',
+          backgroundColor: '#FFFFFF'
+        }}>
+          <h2 style={{
+            margin: '0 0 12px 0',
+            fontSize: '16px',
+            fontWeight: '600',
+            color: '#172B4D',
+            borderBottom: '1px solid #DFE1E6',
+            paddingBottom: '8px'
+          }}>
+            Meeting Summary
+          </h2>
+          <div style={{
+            fontSize: '14px',
+            color: '#172B4D'
+          }}>
+            {summary.whatWasDiscussed && (
+              <div style={{ marginBottom: '12px' }}>
+                <strong style={{ display: 'block', marginBottom: '4px', color: '#172B4D' }}>
+                  What was discussed:
+                </strong>
+                <div style={{ color: '#42526E' }}>{summary.whatWasDiscussed}</div>
+              </div>
+            )}
+            {summary.decisions && summary.decisions.length > 0 && (
+              <div style={{ marginBottom: '12px' }}>
+                <strong style={{ display: 'block', marginBottom: '4px', color: '#172B4D' }}>
+                  Decisions:
+                </strong>
+                <ul style={{ margin: 0, paddingLeft: '20px', color: '#42526E' }}>
+                  {summary.decisions.map((decision, index) => (
+                    <li key={index} style={{ marginBottom: '4px' }}>
+                      {decision}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {summary.actions && summary.actions.length > 0 && (
+              <div>
+                <strong style={{ display: 'block', marginBottom: '4px', color: '#172B4D' }}>
+                  Actions:
+                </strong>
+                <ul style={{ margin: 0, paddingLeft: '20px', color: '#42526E' }}>
+                  {summary.actions.map((action, index) => (
+                    <li key={index} style={{ marginBottom: '4px' }}>
+                      {action}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -618,24 +855,42 @@ function App() {
               cursor: sessionStatus !== 'RUNNING' ? 'not-allowed' : 'text'
             }}
           />
-          <button
-            onClick={handleAnalyze}
-            disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing}
-            style={{
-              marginTop: '12px',
-              padding: '8px 16px',
-              fontSize: '14px',
-              fontWeight: '500',
-              color: '#FFFFFF',
-              backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? '#C1C7D0' : '#0052CC',
-              border: 'none',
-              borderRadius: '3px',
-              cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? 'not-allowed' : 'pointer',
-              transition: 'background-color 0.2s'
-            }}
-          >
-            {isAnalyzing ? 'Analyzing...' : 'Analyze'}
-          </button>
+          <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+            <button
+              onClick={handleAnalyze}
+              disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing}
+              style={{
+                padding: '8px 16px',
+                fontSize: '14px',
+                fontWeight: '500',
+                color: '#FFFFFF',
+                backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? '#C1C7D0' : '#0052CC',
+                border: 'none',
+                borderRadius: '3px',
+                cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? 'not-allowed' : 'pointer',
+                transition: 'background-color 0.2s'
+              }}
+            >
+              {isAnalyzing ? 'Analyzing...' : 'Analyze'}
+            </button>
+            <button
+              onClick={handleGenerateSummary}
+              disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary}
+              style={{
+                padding: '8px 16px',
+                fontSize: '14px',
+                fontWeight: '500',
+                color: '#FFFFFF',
+                backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary) ? '#C1C7D0' : '#36B37E',
+                border: 'none',
+                borderRadius: '3px',
+                cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary) ? 'not-allowed' : 'pointer',
+                transition: 'background-color 0.2s'
+              }}
+            >
+              {isGeneratingSummary ? 'Generating...' : 'Generate Summary'}
+            </button>
+          </div>
         </div>
 
         {/* AI Suggestions Panel */}

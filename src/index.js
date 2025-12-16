@@ -25,6 +25,13 @@ const getCreatedIssuesKey = (contentId) => {
 };
 
 /**
+ * Get storage key for meeting state (per-page)
+ */
+const getMeetingKey = (contentId) => {
+  return `sprintscrbe:${contentId}:meeting`;
+};
+
+/**
  * Get the current session state for a page
  * @param {Object} req - Request object containing contentId
  * @returns {Promise<Object>} Session state object
@@ -549,6 +556,198 @@ resolver.define('getCreatedIssues', async (req) => {
   } catch (error) {
     console.error('Error getting created issues:', error);
     return [];
+  }
+});
+
+/**
+ * Get meeting state for a page
+ * @param {Object} req - Request object containing contentId
+ * @returns {Promise<Object>} Meeting state object with defaults
+ */
+resolver.define('getMeeting', async (req) => {
+  const { contentId } = req.payload;
+  
+  if (!contentId) {
+    return {
+      transcriptText: '',
+      summary: '',
+      createdIssueKeys: [],
+      updatedAt: null
+    };
+  }
+
+  try {
+    const meetingKey = getMeetingKey(contentId);
+    const meeting = await storage.get(meetingKey);
+    
+    if (meeting) {
+      return {
+        transcriptText: meeting.transcriptText || '',
+        summary: meeting.summary || '',
+        createdIssueKeys: meeting.createdIssueKeys || [],
+        updatedAt: meeting.updatedAt || null
+      };
+    }
+    
+    // Return defaults if no meeting exists
+    return {
+      transcriptText: '',
+      summary: '',
+      createdIssueKeys: [],
+      updatedAt: null
+    };
+  } catch (error) {
+    console.error('Error getting meeting:', error);
+    return {
+      transcriptText: '',
+      summary: '',
+      createdIssueKeys: [],
+      updatedAt: null
+    };
+  }
+});
+
+/**
+ * Save transcript text to meeting state
+ * @param {Object} req - Request object containing contentId and transcriptText
+ * @returns {Promise<Object>} Updated meeting state
+ */
+resolver.define('saveTranscript', async (req) => {
+  const { contentId, transcriptText } = req.payload;
+  
+  if (!contentId) {
+    throw new Error('contentId is required');
+  }
+
+  try {
+    const meetingKey = getMeetingKey(contentId);
+    const existingMeeting = await storage.get(meetingKey) || {};
+    
+    const updatedMeeting = {
+      ...existingMeeting,
+      transcriptText: transcriptText || '',
+      updatedAt: new Date().toISOString()
+    };
+    
+    await storage.set(meetingKey, updatedMeeting);
+    
+    return updatedMeeting;
+  } catch (error) {
+    console.error('Error saving transcript:', error);
+    throw error;
+  }
+});
+
+/**
+ * Save created issue keys to meeting state (merge and dedupe)
+ * @param {Object} req - Request object containing contentId and issueKeys
+ * @returns {Promise<Object>} Updated meeting state
+ */
+resolver.define('saveCreatedIssues', async (req) => {
+  const { contentId, issueKeys } = req.payload;
+  
+  if (!contentId) {
+    throw new Error('contentId is required');
+  }
+  
+  if (!issueKeys || !Array.isArray(issueKeys)) {
+    throw new Error('issueKeys must be an array');
+  }
+
+  try {
+    const meetingKey = getMeetingKey(contentId);
+    const existingMeeting = await storage.get(meetingKey) || {};
+    
+    // Get existing keys and merge with new ones, dedupe
+    const existingKeys = existingMeeting.createdIssueKeys || [];
+    const allKeys = [...existingKeys];
+    
+    // Add new keys that don't already exist
+    issueKeys.forEach(key => {
+      if (typeof key === 'string' && !allKeys.includes(key)) {
+        allKeys.push(key);
+      } else if (key && typeof key === 'object' && key.key && !allKeys.includes(key.key)) {
+        // Handle case where issueKeys might be objects with .key property
+        allKeys.push(key.key);
+      }
+    });
+    
+    const updatedMeeting = {
+      ...existingMeeting,
+      createdIssueKeys: allKeys,
+      updatedAt: new Date().toISOString()
+    };
+    
+    await storage.set(meetingKey, updatedMeeting);
+    
+    return updatedMeeting;
+  } catch (error) {
+    console.error('Error saving created issues:', error);
+    throw error;
+  }
+});
+
+/**
+ * Generate a deterministic summary from transcript and analysis
+ * @param {Object} req - Request object containing contentId and transcriptText
+ * @returns {Promise<Object>} Summary object with whatWasDiscussed, decisions, actions
+ */
+resolver.define('generateSummary', async (req) => {
+  const { contentId, transcriptText } = req.payload;
+  
+  if (!contentId) {
+    throw new Error('contentId is required');
+  }
+  
+  if (!transcriptText || !transcriptText.trim()) {
+    throw new Error('transcriptText is required');
+  }
+
+  try {
+    // Get existing analysis for this contentId
+    const analysisKey = getAnalysisKey(contentId);
+    const analysis = await storage.get(analysisKey) || {
+      suggestions: [],
+      decisions: [],
+      actionItems: []
+    };
+    
+    // Extract "What was discussed" - first 2 non-empty lines
+    const lines = transcriptText.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+    
+    const whatWasDiscussed = lines.slice(0, 2).join(' ');
+    
+    // Use decisions from analysis
+    const decisions = analysis.decisions || [];
+    
+    // Use action items from analysis
+    const actions = analysis.actionItems || [];
+    
+    // Build summary object
+    const summary = {
+      whatWasDiscussed: whatWasDiscussed || 'No discussion summary available.',
+      decisions: decisions,
+      actions: actions
+    };
+    
+    // Store summary in meeting state
+    const meetingKey = getMeetingKey(contentId);
+    const existingMeeting = await storage.get(meetingKey) || {};
+    
+    const updatedMeeting = {
+      ...existingMeeting,
+      summary: JSON.stringify(summary), // Store as JSON string for consistency
+      updatedAt: new Date().toISOString()
+    };
+    
+    await storage.set(meetingKey, updatedMeeting);
+    
+    return summary;
+  } catch (error) {
+    console.error('Error generating summary:', error);
+    throw error;
   }
 });
 
