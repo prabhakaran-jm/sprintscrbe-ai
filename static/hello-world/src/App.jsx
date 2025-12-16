@@ -52,6 +52,8 @@ function App() {
   const [uiMessage, setUiMessage] = useState(null);
   // Track if Analyze has been run in the current session (not just loaded from storage)
   const [hasAnalyzedInSession, setHasAnalyzedInSession] = useState(false);
+  // Selected demo scenario
+  const [selectedDemoScenario, setSelectedDemoScenario] = useState('');
 
   // Load contentId, session state, and analysis on mount
   useEffect(() => {
@@ -607,6 +609,159 @@ function App() {
     }
   };
 
+  // Handler to reset meeting (clears transcript, analysis, summary, but keeps created issues)
+  const handleResetMeeting = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
+    // Confirm with user
+    if (!window.confirm('This will clear transcript, analysis, summary, and created issues for this page.')) {
+      return;
+    }
+
+    try {
+      await invoke('resetMeeting', { contentId });
+      
+      // Reset meeting-related state (clear everything including created issues)
+      setAnalysis({
+        suggestions: [],
+        decisions: [],
+        actionItems: []
+      });
+      setSelectedActionItems([]);
+      setSummary(null);
+      setTranscriptText('');
+      setCreatedIssues([]);
+      setMeeting({
+        transcriptText: '',
+        summary: '',
+        createdIssueKeys: [],
+        updatedAt: null
+      });
+      setHasAnalyzedInSession(false);
+      setSessionStatus('IDLE');
+      setUiMessage(null);
+      setError(null);
+      
+      // Show success message
+      setUiMessage({
+        type: 'success',
+        text: 'Meeting reset. Ready for new transcript.'
+      });
+      setTimeout(() => setUiMessage(null), 3000);
+      
+      setDebugInfo(prev => ({
+        ...prev,
+        lastAction: 'resetMeeting',
+        lastResult: { success: true },
+        lastError: null
+      }));
+    } catch (err) {
+      console.error('Error resetting meeting:', err);
+      setError(`Failed to reset meeting: ${err.message || err}`);
+      setUiMessage({
+        type: 'error',
+        text: `Failed to reset meeting: ${err.message || err}`
+      });
+      setTimeout(() => setUiMessage(null), 6000);
+    }
+  };
+
+  // Demo transcript scenarios
+  const demoTranscripts = {
+    'Sprint Planning': `Sprint Planning Meeting — Q1 2025
+Context: Planning next sprint for the engineering team.
+
+Decision: We will focus on the authentication refactor as the top priority.
+We agreed to allocate 3 developers to this effort.
+Decision: We decided to postpone the UI redesign until next quarter.
+
+Action: Sarah will create the sprint backlog by Friday.
+Owner: Sarah
+Due: 2025-01-17
+
+Action: Mike will review the API documentation and provide feedback.
+Owner: Mike
+Due: 2025-01-18
+
+Raj will update the project timeline by end of week.
+Owner: Raj
+
+Suggestion: Consider breaking the auth refactor into smaller stories.
+Suggestion: Add a daily standup to track progress.`,
+
+    'Bug Triage': `Bug Triage Meeting — January 2025
+Context: Reviewing critical bugs reported this week.
+
+Decision: We decided to prioritize P1 bugs for immediate fix.
+We agreed that P2 bugs can wait until next release.
+Decision: We will create a dedicated bug triage process.
+
+Action: Anita will investigate the login timeout issue.
+Owner: Anita
+Due: 2025-01-16
+
+Action: Ben will fix the data export bug by tomorrow.
+Owner: Ben
+Due: 2025-01-15
+
+Action: Lisa will document the new triage process.
+Owner: Lisa
+Due: 2025-01-20
+
+Suggestion: Set up automated bug reporting.
+Suggestion: Create a bug severity matrix.`,
+
+    'Stakeholder Review': `Stakeholder Review — Product Launch Prep
+Context: Final review before product launch next month.
+
+Decision: We decided to launch with core features only.
+We agreed to defer advanced features to v2.
+Decision: We will schedule a go-live meeting for next week.
+
+Action: Tom will prepare the launch checklist.
+Owner: Tom
+Due: 2025-01-22
+
+Action: Emma will coordinate with marketing for announcements.
+Owner: Emma
+Due: 2025-01-25
+
+Action: David will complete security audit by end of month.
+Owner: David
+Due: 2025-01-31
+
+Suggestion: Consider a soft launch with limited users first.
+Suggestion: Prepare rollback plan in case of issues.`
+  };
+
+  // Handler to load demo transcript
+  const handleLoadDemoTranscript = (scenario) => {
+    if (!scenario || !demoTranscripts[scenario]) {
+      return;
+    }
+
+    const transcript = demoTranscripts[scenario];
+    setTranscriptText(transcript);
+    
+    // Trigger autosave by updating meeting state
+    // The debounced saveTranscript effect will handle the actual save
+    setMeeting(prev => ({
+      ...prev,
+      transcriptText: transcript,
+      updatedAt: new Date().toISOString()
+    }));
+
+    // Show success message
+    setUiMessage({
+      type: 'success',
+      text: `Demo transcript "${scenario}" loaded.`
+    });
+    setTimeout(() => setUiMessage(null), 3000);
+  };
+
   // Handler to create Jira issues
   const handleCreateJiraIssues = async () => {
     if (!contentId) {
@@ -871,7 +1026,95 @@ function App() {
         >
           Clear Session
         </button>
+        <button
+          onClick={handleResetMeeting}
+          disabled={!contentId}
+          style={{
+            padding: '8px 16px',
+            fontSize: '14px',
+            fontWeight: '500',
+            color: '#FFFFFF',
+            backgroundColor: !contentId ? '#C1C7D0' : '#FFAB00',
+            border: 'none',
+            borderRadius: '3px',
+            cursor: !contentId ? 'not-allowed' : 'pointer',
+            transition: 'background-color 0.2s'
+          }}
+          onMouseOver={(e) => {
+            if (contentId) {
+              e.target.style.backgroundColor = '#FFC400';
+            }
+          }}
+          onMouseOut={(e) => {
+            if (contentId) {
+              e.target.style.backgroundColor = '#FFAB00';
+            }
+          }}
+          title="Reset meeting (clears transcript, analysis, summary, but keeps created issues)"
+        >
+          Reset Meeting
+        </button>
       </div>
+
+      {/* Demo Transcript Pack */}
+      {sessionStatus === 'RUNNING' && (
+        <div style={{
+          marginBottom: '16px',
+          padding: '12px',
+          backgroundColor: '#F4F5F7',
+          border: '1px solid #DFE1E6',
+          borderRadius: '3px'
+        }}>
+          <label style={{
+            display: 'block',
+            marginBottom: '8px',
+            fontSize: '14px',
+            fontWeight: '500',
+            color: '#172B4D'
+          }}>
+            Demo Scenario:
+          </label>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <select
+              value={selectedDemoScenario}
+              onChange={(e) => setSelectedDemoScenario(e.target.value)}
+              style={{
+                flex: 1,
+                minWidth: '200px',
+                maxWidth: '300px',
+                padding: '6px 8px',
+                border: '1px solid #DFE1E6',
+                borderRadius: '3px',
+                fontSize: '14px',
+                backgroundColor: '#FFFFFF',
+                cursor: 'pointer'
+              }}
+            >
+              <option value="">Select a demo scenario...</option>
+              <option value="Sprint Planning">Sprint Planning</option>
+              <option value="Bug Triage">Bug Triage</option>
+              <option value="Stakeholder Review">Stakeholder Review</option>
+            </select>
+            <button
+              onClick={() => handleLoadDemoTranscript(selectedDemoScenario)}
+              disabled={!selectedDemoScenario}
+              style={{
+                padding: '6px 16px',
+                fontSize: '14px',
+                fontWeight: '500',
+                color: '#FFFFFF',
+                backgroundColor: !selectedDemoScenario ? '#C1C7D0' : '#36B37E',
+                border: 'none',
+                borderRadius: '3px',
+                cursor: !selectedDemoScenario ? 'not-allowed' : 'pointer',
+                transition: 'background-color 0.2s'
+              }}
+            >
+              Load
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Jira Project Selection */}
       {sessionStatus === 'RUNNING' && (
@@ -1153,7 +1396,7 @@ function App() {
           </div>
         </div>
 
-        {/* AI Suggestions Panel */}
+        {/* Suggestions Panel */}
         <div style={{
           border: '1px solid #DFE1E6',
           borderRadius: '3px',
@@ -1169,7 +1412,7 @@ function App() {
             borderBottom: '1px solid #DFE1E6',
             paddingBottom: '8px'
           }}>
-            AI Suggestions
+            Suggestions
           </h2>
           <div style={{
             fontSize: '14px',

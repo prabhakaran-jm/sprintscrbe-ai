@@ -159,14 +159,28 @@ resolver.define('analyzeTranscript', async (req) => {
     const decisions = [];
     const actionItems = [];
     
-    // Extract suggestions (bullet-style insights)
-    // Look for lines starting with bullet points, dashes, or numbered lists
+    // Extract suggestions (bullet-style insights or explicit "Suggestion:" lines)
+    // Look for lines starting with bullet points, dashes, numbered lists, or "Suggestion:"
     lines.forEach((line, index) => {
+      const trimmedLine = line.trim();
+      const lowerLine = trimmedLine.toLowerCase();
+      
+      // Check for explicit "Suggestion:" pattern first
+      const suggestionPattern = /^suggestion\s*:\s*(.+)$/i;
+      if (suggestionPattern.test(trimmedLine)) {
+        const match = trimmedLine.match(suggestionPattern);
+        if (match && match[1]) {
+          suggestions.push(match[1].trim());
+        }
+        return; // Skip other pattern checks if this matches
+      }
+      
+      // Check for bullet points, dashes, or numbered lists
       const bulletPattern = /^[-•*]\s+(.+)$/i;
       const numberedPattern = /^\d+[.)]\s+(.+)$/;
       
-      if (bulletPattern.test(line) || numberedPattern.test(line)) {
-        const match = line.match(bulletPattern) || line.match(numberedPattern);
+      if (bulletPattern.test(trimmedLine) || numberedPattern.test(trimmedLine)) {
+        const match = trimmedLine.match(bulletPattern) || trimmedLine.match(numberedPattern);
         if (match && match[1]) {
           suggestions.push(match[1].trim());
         }
@@ -891,6 +905,39 @@ resolver.define('clearSessionData', async (req) => {
     return { success: true, message: 'Session data cleared successfully' };
   } catch (error) {
     console.error('Error clearing session data:', error);
+    throw error;
+  }
+});
+
+/**
+ * Reset meeting data for a page (meeting, analysis, and created issues)
+ * Clears transcript, analysis, summary, and created issues for a fresh start
+ * @param {Object} req - Request object containing contentId
+ * @returns {Promise<Object>} Success confirmation
+ */
+resolver.define('resetMeeting', async (req) => {
+  const { contentId } = req.payload;
+  
+  if (!contentId) {
+    throw new Error('contentId is required');
+  }
+
+  try {
+    // Clear meeting, analysis, and created issues keys for this contentId
+    const analysisKey = getAnalysisKey(contentId);
+    const meetingKey = getMeetingKey(contentId);
+    const createdIssuesKey = getCreatedIssuesKey(contentId);
+    
+    // Delete meeting, analysis, and created issues
+    await Promise.all([
+      storage.delete(analysisKey),
+      storage.delete(meetingKey),
+      storage.delete(createdIssuesKey)
+    ]);
+    
+    return { success: true, message: 'Meeting data reset successfully' };
+  } catch (error) {
+    console.error('Error resetting meeting:', error);
     throw error;
   }
 });
