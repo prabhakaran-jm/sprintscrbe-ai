@@ -118,14 +118,34 @@ function App() {
                 actionItems: analysisResult.actionItems || []
               });
               // Initialize selected action items (all checked by default)
+              // Handle both old format (string) and new format (object with confidence)
               setSelectedActionItems(
-                (analysisResult.actionItems || []).map((item, index) => ({
-                  index,
-                  text: item,
-                  selected: true,
-                  owner: '',
-                  dueDate: ''
-                }))
+                (analysisResult.actionItems || []).map((item, index) => {
+                  // Backward compatibility: handle string items
+                  if (typeof item === 'string') {
+                    return {
+                      index,
+                      text: item,
+                      selected: true,
+                      owner: '',
+                      dueDate: '',
+                      confidence: 'low', // Default for old format
+                      issueKey: null,
+                      originalLine: item
+                    };
+                  }
+                  // New format with confidence
+                  return {
+                    index,
+                    text: item.text || item,
+                    selected: true,
+                    owner: item.owner || '',
+                    dueDate: item.dueDate || '',
+                    confidence: item.confidence || 'low',
+                    issueKey: null,
+                    originalLine: item.originalLine || item.text || item
+                  };
+                })
               );
             }
           } catch (analysisError) {
@@ -138,6 +158,22 @@ function App() {
             const createdIssuesResult = await invoke('getCreatedIssues', { contentId: contentIdValue });
             if (createdIssuesResult) {
               setCreatedIssues(createdIssuesResult);
+              // Map created issue keys back to action items
+              const issueKeys = createdIssuesResult.map(issue => issue.key || issue);
+              setSelectedActionItems(prev => {
+                // For now, we'll match by index order (first created issue = first action item)
+                // In a production system, you might want to store a mapping
+                return prev.map((item, index) => {
+                  if (index < issueKeys.length && issueKeys[index]) {
+                    return {
+                      ...item,
+                      issueKey: issueKeys[index],
+                      selected: false // Published items are not selected
+                    };
+                  }
+                  return item;
+                });
+              });
             }
           } catch (issuesError) {
             console.warn('Error loading created issues:', issuesError);
@@ -307,13 +343,33 @@ function App() {
           actionItems: result.actionItems || []
         });
         // Update selected action items (all checked by default)
-        const newSelectedItems = (result.actionItems || []).map((item, index) => ({
-          index,
-          text: item,
-          selected: true,
-          owner: '',
-          dueDate: ''
-        }));
+        // Handle both old format (string) and new format (object with confidence)
+        const newSelectedItems = (result.actionItems || []).map((item, index) => {
+          // Backward compatibility: handle string items
+          if (typeof item === 'string') {
+            return {
+              index,
+              text: item,
+              selected: true,
+              owner: '',
+              dueDate: '',
+              confidence: 'low', // Default for old format
+              issueKey: null,
+              originalLine: item
+            };
+          }
+          // New format with confidence
+          return {
+            index,
+            text: item.text || item,
+            selected: true,
+            owner: item.owner || '',
+            dueDate: item.dueDate || '',
+            confidence: item.confidence || 'low',
+            issueKey: null,
+            originalLine: item.originalLine || item.text || item
+          };
+        });
         setSelectedActionItems(newSelectedItems);
         setDebugInfo(prev => ({
           ...prev,
@@ -471,7 +527,8 @@ function App() {
       const itemsToCreate = selectedItems.map(item => ({
         text: item.text,
         owner: item.owner || undefined,
-        dueDate: item.dueDate || undefined
+        dueDate: item.dueDate || undefined,
+        originalLine: item.originalLine || item.text
       }));
 
       const result = await invoke('createJiraIssuesFromActionItems', {
@@ -483,6 +540,25 @@ function App() {
       if (result && Array.isArray(result)) {
         // Update created issues list
         setCreatedIssues(prev => [...prev, ...result]);
+        
+        // Map created issues back to action items by index
+        // Update selectedActionItems to mark which items are published
+        setSelectedActionItems(prev => {
+          const updated = [...prev];
+          let resultIndex = 0;
+          selectedItems.forEach(selectedItem => {
+            const itemIndex = updated.findIndex(item => item.index === selectedItem.index);
+            if (itemIndex !== -1 && resultIndex < result.length) {
+              updated[itemIndex] = {
+                ...updated[itemIndex],
+                issueKey: result[resultIndex].key,
+                selected: false // Uncheck published items
+              };
+              resultIndex++;
+            }
+          });
+          return updated;
+        });
         
         // Save created issue keys to meeting state
         const issueKeys = result.map(issue => issue.key || issue);
@@ -800,11 +876,25 @@ function App() {
                   Actions:
                 </strong>
                 <ul style={{ margin: 0, paddingLeft: '20px', color: '#42526E' }}>
-                  {summary.actions.map((action, index) => (
-                    <li key={index} style={{ marginBottom: '4px' }}>
-                      {action}
-                    </li>
-                  ))}
+                  {summary.actions.map((action, index) => {
+                    // Handle both string format (backward compatibility) and object format
+                    if (typeof action === 'string') {
+                      return (
+                        <li key={index} style={{ marginBottom: '4px' }}>
+                          {action}
+                        </li>
+                      );
+                    }
+                    // Object format: display text with owner and due date if available
+                    const actionText = action.text || action.originalLine || String(action);
+                    const ownerText = action.owner ? ` Owner: ${action.owner}` : '';
+                    const dueText = action.dueDate ? ` Due: ${action.dueDate}` : '';
+                    return (
+                      <li key={index} style={{ marginBottom: '4px' }}>
+                        {actionText}{ownerText}{dueText}
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             )}
@@ -993,108 +1083,273 @@ function App() {
           }}>
             {selectedActionItems.length > 0 ? (
               <div>
-                {selectedActionItems.map((item) => (
-                  <div key={`action-item-${item.index}`} style={{
-                    marginBottom: '12px',
-                    padding: '8px',
-                    border: '1px solid #DFE1E6',
-                    borderRadius: '3px',
-                    backgroundColor: item.selected ? '#FFFFFF' : '#F4F5F7'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '8px' }}>
-                      <input
-                        type="checkbox"
-                        id={`checkbox-${item.index}`}
-                        checked={item.selected}
-                        onChange={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          toggleActionItemSelection(item.index);
-                        }}
-                        disabled={sessionStatus !== 'RUNNING'}
-                        style={{
-                          marginTop: '4px',
-                          cursor: sessionStatus !== 'RUNNING' ? 'not-allowed' : 'pointer',
-                          pointerEvents: sessionStatus !== 'RUNNING' ? 'none' : 'auto',
-                          width: '18px',
-                          height: '18px',
-                          flexShrink: 0
-                        }}
-                      />
-                      <label
-                        htmlFor={`checkbox-${item.index}`}
-                        style={{
-                          flex: 1,
-                          fontSize: '13px',
-                          cursor: sessionStatus !== 'RUNNING' ? 'default' : 'pointer',
-                          margin: 0,
-                          userSelect: 'none'
-                        }}
-                        onClick={(e) => {
-                          if (sessionStatus === 'RUNNING') {
-                            e.preventDefault();
-                            toggleActionItemSelection(item.index);
-                          }
-                        }}
-                      >
-                        {item.text}
-                      </label>
-                    </div>
-                    {item.selected && sessionStatus === 'RUNNING' && (
-                      <div style={{ marginLeft: '24px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-                        <div style={{ flex: 1, minWidth: '150px' }}>
-                          <label style={{ display: 'block', fontSize: '11px', color: '#6B778C', marginBottom: '4px' }}>
-                            Owner:
-                          </label>
-                          <input
-                            type="text"
-                            value={item.owner}
-                            onChange={(e) => updateActionItemOwner(item.index, e.target.value)}
-                            placeholder="Name or email"
-                            style={{
-                              width: '100%',
-                              padding: '4px 6px',
-                              fontSize: '12px',
-                              border: '1px solid #DFE1E6',
-                              borderRadius: '3px'
-                            }}
-                          />
+                {/* Draft Action Items */}
+                {selectedActionItems.filter(item => !item.issueKey).length > 0 && (
+                  <div style={{ marginBottom: '20px' }}>
+                    <h3 style={{
+                      margin: '0 0 8px 0',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      color: '#42526E',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px'
+                    }}>
+                      Draft Action Items
+                    </h3>
+                    {selectedActionItems.filter(item => !item.issueKey).map((item) => {
+                      const isPublished = !!item.issueKey;
+                      const isDisabled = isPublished || sessionStatus !== 'RUNNING';
+                      const confidenceColors = {
+                        high: { bg: '#E3FCEF', text: '#006644', border: '#57D9A3' },
+                        medium: { bg: '#FFF4E5', text: '#974F00', border: '#FFC400' },
+                        low: { bg: '#F4F5F7', text: '#42526E', border: '#C1C7D0' }
+                      };
+                      const confStyle = confidenceColors[item.confidence] || confidenceColors.low;
+                      
+                      return (
+                        <div key={`action-item-${item.index}`} style={{
+                          marginBottom: '12px',
+                          padding: '8px',
+                          border: '1px solid #DFE1E6',
+                          borderRadius: '3px',
+                          backgroundColor: item.selected ? '#FFFFFF' : '#F4F5F7',
+                          opacity: isDisabled ? 0.6 : 1
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                            <input
+                              type="checkbox"
+                              id={`checkbox-${item.index}`}
+                              checked={item.selected}
+                              onChange={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                toggleActionItemSelection(item.index);
+                              }}
+                              disabled={isDisabled}
+                              style={{
+                                marginTop: '4px',
+                                cursor: isDisabled ? 'not-allowed' : 'pointer',
+                                pointerEvents: isDisabled ? 'none' : 'auto',
+                                width: '18px',
+                                height: '18px',
+                                flexShrink: 0
+                              }}
+                            />
+                            <label
+                              htmlFor={`checkbox-${item.index}`}
+                              style={{
+                                flex: 1,
+                                fontSize: '13px',
+                                cursor: isDisabled ? 'default' : 'pointer',
+                                margin: 0,
+                                userSelect: 'none',
+                                minWidth: '200px'
+                              }}
+                              onClick={(e) => {
+                                if (!isDisabled) {
+                                  e.preventDefault();
+                                  toggleActionItemSelection(item.index);
+                                }
+                              }}
+                            >
+                              {item.text}
+                            </label>
+                            {/* Confidence Badge */}
+                            <span style={{
+                              padding: '2px 6px',
+                              fontSize: '10px',
+                              fontWeight: '600',
+                              borderRadius: '3px',
+                              backgroundColor: confStyle.bg,
+                              color: confStyle.text,
+                              border: `1px solid ${confStyle.border}`,
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.5px',
+                              flexShrink: 0
+                            }}>
+                              {item.confidence || 'low'}
+                            </span>
+                            {/* Status Label */}
+                            {isPublished && (
+                              <span style={{
+                                padding: '2px 6px',
+                                fontSize: '10px',
+                                fontWeight: '600',
+                                borderRadius: '3px',
+                                backgroundColor: '#E3FCEF',
+                                color: '#006644',
+                                border: '1px solid #57D9A3',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.5px',
+                                flexShrink: 0
+                              }}>
+                                Published: {item.issueKey}
+                              </span>
+                            )}
+                            {!isPublished && (
+                              <span style={{
+                                padding: '2px 6px',
+                                fontSize: '10px',
+                                fontWeight: '600',
+                                borderRadius: '3px',
+                                backgroundColor: '#F4F5F7',
+                                color: '#42526E',
+                                border: '1px solid #C1C7D0',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.5px',
+                                flexShrink: 0
+                              }}>
+                                Draft
+                              </span>
+                            )}
+                          </div>
+                          {item.selected && !isDisabled && (
+                            <div style={{ marginLeft: '24px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                              <div style={{ flex: 1, minWidth: '150px' }}>
+                                <label style={{ display: 'block', fontSize: '11px', color: '#6B778C', marginBottom: '4px' }}>
+                                  Owner:
+                                </label>
+                                <input
+                                  type="text"
+                                  value={item.owner || ''}
+                                  onChange={(e) => updateActionItemOwner(item.index, e.target.value)}
+                                  placeholder="Name or email"
+                                  disabled={isDisabled}
+                                  style={{
+                                    width: '100%',
+                                    padding: '4px 6px',
+                                    fontSize: '12px',
+                                    border: '1px solid #DFE1E6',
+                                    borderRadius: '3px',
+                                    backgroundColor: isDisabled ? '#F4F5F7' : '#FFFFFF'
+                                  }}
+                                />
+                              </div>
+                              <div style={{ flex: 1, minWidth: '150px' }}>
+                                <label style={{ display: 'block', fontSize: '11px', color: '#6B778C', marginBottom: '4px' }}>
+                                  Due Date:
+                                </label>
+                                <input
+                                  type="date"
+                                  value={item.dueDate || ''}
+                                  onChange={(e) => updateActionItemDueDate(item.index, e.target.value)}
+                                  disabled={isDisabled}
+                                  style={{
+                                    width: '100%',
+                                    padding: '4px 6px',
+                                    fontSize: '12px',
+                                    border: '1px solid #DFE1E6',
+                                    borderRadius: '3px',
+                                    backgroundColor: isDisabled ? '#F4F5F7' : '#FFFFFF'
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          )}
                         </div>
-                        <div style={{ flex: 1, minWidth: '150px' }}>
-                          <label style={{ display: 'block', fontSize: '11px', color: '#6B778C', marginBottom: '4px' }}>
-                            Due Date:
-                          </label>
-                          <input
-                            type="date"
-                            value={item.dueDate}
-                            onChange={(e) => updateActionItemDueDate(item.index, e.target.value)}
-                            style={{
-                              width: '100%',
-                              padding: '4px 6px',
-                              fontSize: '12px',
-                              border: '1px solid #DFE1E6',
-                              borderRadius: '3px'
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
+                      );
+                    })}
                   </div>
-                ))}
-                {sessionStatus === 'RUNNING' && (
+                )}
+                
+                {/* Published Action Items */}
+                {selectedActionItems.filter(item => item.issueKey).length > 0 && (
+                  <div>
+                    <h3 style={{
+                      margin: '0 0 8px 0',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      color: '#42526E',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px'
+                    }}>
+                      Published Action Items
+                    </h3>
+                    {selectedActionItems.filter(item => item.issueKey).map((item) => {
+                      const confidenceColors = {
+                        high: { bg: '#E3FCEF', text: '#006644', border: '#57D9A3' },
+                        medium: { bg: '#FFF4E5', text: '#974F00', border: '#FFC400' },
+                        low: { bg: '#F4F5F7', text: '#42526E', border: '#C1C7D0' }
+                      };
+                      const confStyle = confidenceColors[item.confidence] || confidenceColors.low;
+                      
+                      return (
+                        <div key={`action-item-${item.index}`} style={{
+                          marginBottom: '12px',
+                          padding: '8px',
+                          border: '1px solid #DFE1E6',
+                          borderRadius: '3px',
+                          backgroundColor: '#F4F5F7',
+                          opacity: 0.8
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                            <div style={{
+                              flex: 1,
+                              fontSize: '13px',
+                              margin: 0,
+                              minWidth: '200px'
+                            }}>
+                              {item.text}
+                            </div>
+                            {/* Confidence Badge */}
+                            <span style={{
+                              padding: '2px 6px',
+                              fontSize: '10px',
+                              fontWeight: '600',
+                              borderRadius: '3px',
+                              backgroundColor: confStyle.bg,
+                              color: confStyle.text,
+                              border: `1px solid ${confStyle.border}`,
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.5px',
+                              flexShrink: 0
+                            }}>
+                              {item.confidence || 'low'}
+                            </span>
+                            {/* Status Label */}
+                            <span style={{
+                              padding: '2px 6px',
+                              fontSize: '10px',
+                              fontWeight: '600',
+                              borderRadius: '3px',
+                              backgroundColor: '#E3FCEF',
+                              color: '#006644',
+                              border: '1px solid #57D9A3',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.5px',
+                              flexShrink: 0
+                            }}>
+                              Published: {item.issueKey}
+                            </span>
+                          </div>
+                          {(item.owner || item.dueDate) && (
+                            <div style={{ marginLeft: '0', fontSize: '11px', color: '#6B778C' }}>
+                              {item.owner && <span>Owner: {item.owner}</span>}
+                              {item.owner && item.dueDate && <span> • </span>}
+                              {item.dueDate && <span>Due: {item.dueDate}</span>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                
+                {/* Create Jira Issues Button */}
+                {sessionStatus === 'RUNNING' && selectedActionItems.filter(item => !item.issueKey && item.selected).length > 0 && (
                   <button
                     onClick={handleCreateJiraIssues}
-                    disabled={!selectedProjectKey || selectedActionItems.filter(item => item.selected).length === 0 || isCreatingIssues}
+                    disabled={!selectedProjectKey || selectedActionItems.filter(item => !item.issueKey && item.selected).length === 0 || isCreatingIssues}
                     style={{
                       marginTop: '12px',
                       padding: '8px 16px',
                       fontSize: '14px',
                       fontWeight: '500',
                       color: '#FFFFFF',
-                      backgroundColor: (!selectedProjectKey || selectedActionItems.filter(item => item.selected).length === 0 || isCreatingIssues) ? '#C1C7D0' : '#0052CC',
+                      backgroundColor: (!selectedProjectKey || selectedActionItems.filter(item => !item.issueKey && item.selected).length === 0 || isCreatingIssues) ? '#C1C7D0' : '#0052CC',
                       border: 'none',
                       borderRadius: '3px',
-                      cursor: (!selectedProjectKey || selectedActionItems.filter(item => item.selected).length === 0 || isCreatingIssues) ? 'not-allowed' : 'pointer'
+                      cursor: (!selectedProjectKey || selectedActionItems.filter(item => !item.issueKey && item.selected).length === 0 || isCreatingIssues) ? 'not-allowed' : 'pointer'
                     }}
                   >
                     {isCreatingIssues ? 'Creating Issues...' : 'Create Jira Issues'}

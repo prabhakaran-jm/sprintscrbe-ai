@@ -193,44 +193,98 @@ resolver.define('analyzeTranscript', async (req) => {
       }
     });
     
-    // Extract action items
-    // Look for patterns like "X will Y by Z", "Action:", "owner", "due", "assign"
-    const actionPatterns = [
-      /(?:action|task|todo|action item)\s*:/i,
-      /\b(?:will|should|must|needs to)\s+(?:do|complete|finish|deliver|implement)/i,
-      /\b(?:owner|assigned to|assignee|responsible)\s*:/i,
-      /\b(?:due|deadline|by|target)\s*(?:date|date:|on)?\s*:?/i,
-      /\b(?:by|before|until)\s+\d{1,2}[\/\-]\d{1,2}/i // dates like "by 12/31" or "before 12-31"
-    ];
+    // Extract action items with improved parsing
+    // Treat "Action:" lines as primary, attach subsequent "Owner:" and "Due:" lines
+    let currentActionItem = null;
     
-    lines.forEach((line) => {
+    lines.forEach((line, index) => {
       const lowerLine = line.toLowerCase();
-      let isActionItem = false;
+      const trimmedLine = line.trim();
       
-      // Check for explicit action markers
-      if (/action\s*:/i.test(lowerLine) || /task\s*:/i.test(lowerLine)) {
-        isActionItem = true;
+      // Check if this is an "Action:" line (primary action item)
+      const actionMatch = trimmedLine.match(/^action\s*:\s*(.+)$/i);
+      if (actionMatch) {
+        // Save previous action item if exists
+        if (currentActionItem) {
+          actionItems.push(currentActionItem);
+        }
+        
+        // Start new action item with high confidence
+        currentActionItem = {
+          text: actionMatch[1].trim(),
+          owner: undefined,
+          dueDate: undefined,
+          confidence: 'high',
+          originalLine: trimmedLine
+        };
+        return;
       }
       
-      // Check for "will/should/must" patterns
-      if (/\b(?:will|should|must|needs to)\s+(?:do|complete|finish|deliver|implement|create|update|fix)/i.test(lowerLine)) {
-        isActionItem = true;
+      // Check if this is an "Owner:" line - attach to current action item
+      const ownerMatch = trimmedLine.match(/^owner\s*:\s*(.+)$/i);
+      if (ownerMatch && currentActionItem) {
+        currentActionItem.owner = ownerMatch[1].trim();
+        return;
       }
       
-      // Check for owner/assignee patterns
-      if (/\b(?:owner|assigned to|assignee|responsible)\s*:/i.test(lowerLine)) {
-        isActionItem = true;
+      // Check if this is a "Due:" or "Due Date:" line - attach to current action item
+      const dueMatch = trimmedLine.match(/^due\s*(?:date)?\s*:\s*(.+)$/i);
+      if (dueMatch && currentActionItem) {
+        // Try to parse date formats
+        const dueText = dueMatch[1].trim();
+        // Try common date formats: YYYY-MM-DD, MM/DD/YYYY, DD/MM/YYYY, "EOW", "tomorrow", etc.
+        if (dueText.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          currentActionItem.dueDate = dueText;
+        } else if (dueText.match(/^\d{1,2}[\/\-]\d{1,2}[\/\-]?\d{0,4}$/)) {
+          // Basic date format - store as-is for now
+          currentActionItem.dueDate = dueText;
+        } else {
+          // Store text as-is (e.g., "EOW", "tomorrow")
+          currentActionItem.dueDate = dueText;
+        }
+        return;
       }
       
-      // Check for due date patterns
-      if (/\b(?:due|deadline|by|before|until)\s*(?:date|date:|on)?\s*:?\s*\d/i.test(lowerLine)) {
-        isActionItem = true;
+      // If we have a current action item and this line doesn't match Action/Owner/Due,
+      // check if it's a continuation or if we should finalize the current item
+      if (currentActionItem) {
+        // If this line doesn't look like metadata, it might be a continuation
+        // For now, we'll finalize the current action item and check if this is a new action
+        actionItems.push(currentActionItem);
+        currentActionItem = null;
       }
       
-      if (isActionItem) {
-        actionItems.push(line);
+      // Check for "will" patterns (medium confidence) - only if not already in an action item
+      if (!currentActionItem && /\b(?:will|should|must|needs to)\s+(?:do|complete|finish|deliver|implement|create|update|fix|test|deploy)/i.test(lowerLine)) {
+        actionItems.push({
+          text: trimmedLine,
+          owner: undefined,
+          dueDate: undefined,
+          confidence: 'medium',
+          originalLine: trimmedLine
+        });
+        return;
+      }
+      
+      // Low confidence: other action-like patterns (only if no current action item)
+      if (!currentActionItem && (
+        /(?:task|todo|action item)\s*:/i.test(lowerLine) ||
+        /\b(?:assign|responsible|owner)\s*:/i.test(lowerLine)
+      )) {
+        actionItems.push({
+          text: trimmedLine,
+          owner: undefined,
+          dueDate: undefined,
+          confidence: 'low',
+          originalLine: trimmedLine
+        });
       }
     });
+    
+    // Don't forget the last action item
+    if (currentActionItem) {
+      actionItems.push(currentActionItem);
+    }
     
     // Store the analysis
     const analysis = {
@@ -424,9 +478,39 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
         continue; // Skip empty items
       }
 
-      // Parse the action item
+      // Parse the action item (for backward compatibility)
       const parsed = parseActionItem(item.text);
       const summary = parsed.text || item.text;
+      
+      // Get Confluence page URL for description
+      const pageUrl = confluenceBaseUrl ? `${confluenceBaseUrl}/wiki/spaces/*/pages/${contentId}` : '';
+      
+      // Get meeting summary if available
+      const meetingKey = getMeetingKey(contentId);
+      const meeting = await storage.get(meetingKey) || {};
+      let meetingSummaryText = '';
+      if (meeting.summary) {
+        try {
+          const summaryObj = typeof meeting.summary === 'string' ? JSON.parse(meeting.summary) : meeting.summary;
+          if (summaryObj && summaryObj.whatWasDiscussed) {
+            meetingSummaryText = summaryObj.whatWasDiscussed;
+          }
+        } catch (e) {
+          // Ignore parsing errors
+        }
+      }
+      
+      // Build enriched description
+      const descriptionParts = [];
+      if (pageUrl) {
+        descriptionParts.push(`Source: ${pageUrl}`);
+      }
+      if (meetingSummaryText) {
+        descriptionParts.push(`\n\nMeeting Summary:\n${meetingSummaryText}`);
+      }
+      descriptionParts.push(`\n\nExtracted from transcript: ${item.originalLine || item.text}`);
+      
+      const description = descriptionParts.join('');
       
       // Build issue creation payload
       const issuePayload = {
@@ -437,6 +521,21 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
           summary: summary.substring(0, 255), // Jira summary max length
           issuetype: {
             name: 'Task'
+          },
+          description: {
+            type: 'doc',
+            version: 1,
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: description
+                  }
+                ]
+              }
+            ]
           }
         }
       };
@@ -481,8 +580,7 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
       const issueKey = createdIssue.key;
       const issueUrl = `${confluenceBaseUrl}/browse/${issueKey}`;
 
-      // Add comment with link back to Confluence page
-      const pageUrl = confluenceBaseUrl ? `${confluenceBaseUrl}/wiki/spaces/*/pages/${contentId}` : '';
+      // Add comment with link back to Confluence page (reuse pageUrl from above)
       const commentBody = pageUrl 
         ? `Created from SprintScribe AI analysis on Confluence page: ${pageUrl}`
         : `Created from SprintScribe AI analysis (Content ID: ${contentId})`;
@@ -723,7 +821,18 @@ resolver.define('generateSummary', async (req) => {
     const decisions = analysis.decisions || [];
     
     // Use action items from analysis
-    const actions = analysis.actionItems || [];
+    // Format action items for summary display (extract text from objects if needed)
+    const actions = (analysis.actionItems || []).map(item => {
+      // If it's already a string, return as-is
+      if (typeof item === 'string') {
+        return item;
+      }
+      // If it's an object, format it for display
+      const actionText = item.text || item.originalLine || String(item);
+      const ownerText = item.owner ? ` Owner: ${item.owner}` : '';
+      const dueText = item.dueDate ? ` Due: ${item.dueDate}` : '';
+      return `${actionText}${ownerText}${dueText}`;
+    });
     
     // Build summary object
     const summary = {
