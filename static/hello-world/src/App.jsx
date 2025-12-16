@@ -1,12 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@forge/bridge';
-import { view } from '@forge/bridge';
 
 function App() {
-  // Session status: 'IDLE' | 'LIVE'
+  // Session status: 'IDLE' | 'RUNNING'
   const [sessionStatus, setSessionStatus] = useState('IDLE');
-  // Page ID from context
-  const [pageId, setPageId] = useState(null);
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
   // Error state
@@ -19,76 +16,48 @@ function App() {
   });
   const [showDebug, setShowDebug] = useState(false);
 
-  // Get page context on mount
+  // Load session state on mount
   useEffect(() => {
-    const getPageContext = async () => {
+    const loadSessionState = async () => {
       try {
-        // Get context from Forge bridge
-        const context = await view.getContext();
-        const contentId = context?.extension?.content?.id || context?.content?.id;
+        setIsLoading(true);
+        setError(null);
         
-        if (contentId) {
-          setPageId(contentId);
-          // Load session status
-          await loadSessionStatus(contentId);
-        } else {
-          console.warn('Could not get page ID from context:', context);
-          setError('Could not determine page ID');
-          setIsLoading(false);
+        const result = await invoke('getSessionState');
+        
+        if (result && result.status) {
+          setSessionStatus(result.status);
+          setDebugInfo(prev => ({
+            ...prev,
+            lastAction: 'getSessionState',
+            lastResult: result
+          }));
         }
       } catch (err) {
-        console.error('Error getting page context:', err);
-        setError('Failed to get page context');
+        console.error('Error loading session state:', err);
+        setError(`Failed to load session state: ${err.message || err}`);
+        setDebugInfo(prev => ({
+          ...prev,
+          lastAction: 'getSessionState',
+          lastError: err.message || String(err)
+        }));
+      } finally {
         setIsLoading(false);
       }
     };
 
-    getPageContext();
+    loadSessionState();
   }, []);
-
-  // Load session status from backend
-  const loadSessionStatus = async (pid) => {
-    try {
-      setIsLoading(true);
-      setError(null);
-      
-      const result = await invoke('getSessionStatus', { pageId: pid });
-      
-      if (result && result.status) {
-        setSessionStatus(result.status);
-        setDebugInfo(prev => ({
-          ...prev,
-          lastAction: 'getSessionStatus',
-          lastResult: result
-        }));
-      }
-    } catch (err) {
-      console.error('Error loading session status:', err);
-      setError(`Failed to load session status: ${err.message || err}`);
-      setDebugInfo(prev => ({
-        ...prev,
-        lastAction: 'getSessionStatus',
-        lastError: err.message || String(err)
-      }));
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   // Handler to start the session with optimistic update
   const handleStartSession = async () => {
-    if (!pageId) {
-      setError('Page ID not available');
-      return;
-    }
-
     // Optimistic update
     const previousStatus = sessionStatus;
-    setSessionStatus('LIVE');
+    setSessionStatus('RUNNING');
     setError(null);
 
     try {
-      const result = await invoke('startSession', { pageId });
+      const result = await invoke('startSession');
       
       if (result && result.status) {
         setSessionStatus(result.status);
@@ -114,18 +83,13 @@ function App() {
 
   // Handler to stop the session with optimistic update
   const handleStopSession = async () => {
-    if (!pageId) {
-      setError('Page ID not available');
-      return;
-    }
-
     // Optimistic update
     const previousStatus = sessionStatus;
     setSessionStatus('IDLE');
     setError(null);
 
     try {
-      const result = await invoke('stopSession', { pageId });
+      const result = await invoke('stopSession');
       
       if (result && result.status) {
         setSessionStatus(result.status);
@@ -220,8 +184,8 @@ function App() {
             display: 'inline-block',
             padding: '4px 12px',
             borderRadius: '3px',
-            backgroundColor: sessionStatus === 'LIVE' ? '#00875A' : '#DFE1E6',
-            color: sessionStatus === 'LIVE' ? '#FFFFFF' : '#42526E',
+            backgroundColor: sessionStatus === 'RUNNING' ? '#00875A' : '#DFE1E6',
+            color: sessionStatus === 'RUNNING' ? '#FFFFFF' : '#42526E',
             fontSize: '12px',
             fontWeight: '600',
             textTransform: 'uppercase'
@@ -239,25 +203,25 @@ function App() {
       }}>
         <button
           onClick={handleStartSession}
-          disabled={sessionStatus === 'LIVE'}
+          disabled={sessionStatus === 'RUNNING'}
           style={{
             padding: '8px 16px',
             fontSize: '14px',
             fontWeight: '500',
             color: '#FFFFFF',
-            backgroundColor: sessionStatus === 'LIVE' ? '#C1C7D0' : '#0052CC',
+            backgroundColor: sessionStatus === 'RUNNING' ? '#C1C7D0' : '#0052CC',
             border: 'none',
             borderRadius: '3px',
-            cursor: sessionStatus === 'LIVE' ? 'not-allowed' : 'pointer',
+            cursor: sessionStatus === 'RUNNING' ? 'not-allowed' : 'pointer',
             transition: 'background-color 0.2s'
           }}
           onMouseOver={(e) => {
-            if (sessionStatus !== 'LIVE') {
+            if (sessionStatus !== 'RUNNING') {
               e.target.style.backgroundColor = '#0065FF';
             }
           }}
           onMouseOut={(e) => {
-            if (sessionStatus !== 'LIVE') {
+            if (sessionStatus !== 'RUNNING') {
               e.target.style.backgroundColor = '#0052CC';
             }
           }}
@@ -305,7 +269,6 @@ function App() {
           fontFamily: 'monospace'
         }}>
           <div style={{ fontWeight: '600', marginBottom: '8px' }}>Debug Info:</div>
-          <div><strong>Page ID:</strong> {pageId || 'Not available'}</div>
           <div><strong>Last Action:</strong> {debugInfo.lastAction || 'None'}</div>
           {debugInfo.lastResult && (
             <div style={{ marginTop: '4px' }}>

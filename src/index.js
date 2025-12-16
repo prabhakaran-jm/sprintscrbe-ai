@@ -3,58 +3,41 @@ import { storage } from '@forge/api';
 
 const resolver = new Resolver();
 
-// Storage key prefix for session data
-const SESSION_KEY_PREFIX = 'sprintscrbe:session:';
+// Storage key for session state
+const STORAGE_KEY = 'sprintscrbe.session.state';
 
 /**
- * Get the current session status for a page
- * @param {Object} req - Request object containing pageId
- * @returns {Promise<Object>} Session status object
+ * Get the current session state
+ * @returns {Promise<Object>} Session state object
  */
-resolver.define('getSessionStatus', async (req) => {
-  const { pageId } = req.payload;
-  
-  if (!pageId) {
-    return { status: 'IDLE', updatedAt: null };
-  }
-
+resolver.define('getSessionState', async () => {
   try {
-    const storageKey = `${SESSION_KEY_PREFIX}${pageId}`;
-    const sessionData = await storage.get(storageKey);
+    const sessionData = await storage.get(STORAGE_KEY);
     
-    if (sessionData) {
+    if (sessionData && sessionData.status) {
       return sessionData;
     }
     
     // Default to IDLE if no session exists
-    return { status: 'IDLE', updatedAt: null };
+    return { status: 'IDLE' };
   } catch (error) {
-    console.error('Error getting session status:', error);
+    console.error('Error getting session state:', error);
     // Return IDLE on error to avoid breaking the UI
-    return { status: 'IDLE', updatedAt: null };
+    return { status: 'IDLE' };
   }
 });
 
 /**
- * Start a session for a page
- * @param {Object} req - Request object containing pageId
- * @returns {Promise<Object>} Updated session status
+ * Start a session
+ * @returns {Promise<Object>} Updated session state
  */
-resolver.define('startSession', async (req) => {
-  const { pageId } = req.payload;
-  
-  if (!pageId) {
-    throw new Error('pageId is required');
-  }
-
+resolver.define('startSession', async () => {
   try {
-    const storageKey = `${SESSION_KEY_PREFIX}${pageId}`;
     const sessionData = {
-      status: 'LIVE',
-      updatedAt: new Date().toISOString()
+      status: 'RUNNING'
     };
     
-    await storage.set(storageKey, sessionData);
+    await storage.set(STORAGE_KEY, sessionData);
     
     return sessionData;
   } catch (error) {
@@ -64,25 +47,16 @@ resolver.define('startSession', async (req) => {
 });
 
 /**
- * Stop a session for a page
- * @param {Object} req - Request object containing pageId
- * @returns {Promise<Object>} Updated session status
+ * Stop a session
+ * @returns {Promise<Object>} Updated session state
  */
-resolver.define('stopSession', async (req) => {
-  const { pageId } = req.payload;
-  
-  if (!pageId) {
-    throw new Error('pageId is required');
-  }
-
+resolver.define('stopSession', async () => {
   try {
-    const storageKey = `${SESSION_KEY_PREFIX}${pageId}`;
     const sessionData = {
-      status: 'IDLE',
-      updatedAt: new Date().toISOString()
+      status: 'IDLE'
     };
     
-    await storage.set(storageKey, sessionData);
+    await storage.set(STORAGE_KEY, sessionData);
     
     return sessionData;
   } catch (error) {
