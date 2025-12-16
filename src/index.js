@@ -1,5 +1,5 @@
 import Resolver from '@forge/resolver';
-import { storage } from '@forge/api';
+import api, { storage, route } from '@forge/api';
 
 const resolver = new Resolver();
 
@@ -15,6 +15,13 @@ const getSessionKey = (contentId) => {
  */
 const getAnalysisKey = (contentId) => {
   return `sprintscrbe:${contentId}:analysis`;
+};
+
+/**
+ * Get storage key for created issues (per-page)
+ */
+const getCreatedIssuesKey = (contentId) => {
+  return `sprintscrbe:${contentId}:createdIssues`;
 };
 
 /**
@@ -232,6 +239,316 @@ resolver.define('analyzeTranscript', async (req) => {
   } catch (error) {
     console.error('Error analyzing transcript:', error);
     throw error;
+  }
+});
+
+/**
+ * List available Jira projects
+ * @returns {Promise<Array>} Array of project objects with key and name
+ */
+resolver.define('listJiraProjects', async (req) => {
+  try {
+    // Use route template literal tag with asUser() to make authenticated request to Jira API
+    const response = await api.asUser().requestJira(route`/rest/api/3/project`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      // Get detailed error message from response
+      let errorMessage = `Failed to fetch projects: ${response.status}`;
+      try {
+        const errorBody = await response.text();
+        if (errorBody) {
+          errorMessage += ` - ${errorBody}`;
+        }
+      } catch (e) {
+        // Ignore if we can't read error body
+      }
+      console.error('Jira API error:', errorMessage);
+      throw new Error(errorMessage);
+    }
+
+    const projects = await response.json();
+    
+    // Return simplified project list (key and name)
+    return projects.map(project => ({
+      key: project.key,
+      name: project.name
+    })).slice(0, 50); // Limit to first 50 projects
+  } catch (error) {
+    console.error('Error listing Jira projects:', error);
+    throw error;
+  }
+});
+
+/**
+ * Parse action item text to extract owner and due date
+ * @param {string} text - Action item text
+ * @returns {Object} Parsed object with text, owner, dueDate
+ */
+const parseActionItem = (text) => {
+  let cleanText = text.trim();
+  let owner = null;
+  let dueDate = null;
+
+  // Remove leading "Action:", "Task:", etc.
+  cleanText = cleanText.replace(/^(?:action|task|todo|action item)\s*:\s*/i, '');
+
+  // Extract owner patterns: "Owner: John", "Assigned to: Jane", etc.
+  const ownerPatterns = [
+    /(?:owner|assigned to|assignee|responsible)\s*:\s*([^\n,;]+)/i,
+    /\b(?:by|from)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i
+  ];
+  
+  for (const pattern of ownerPatterns) {
+    const match = cleanText.match(pattern);
+    if (match && match[1]) {
+      owner = match[1].trim();
+      cleanText = cleanText.replace(pattern, '').trim();
+      break;
+    }
+  }
+
+  // Extract due date patterns: "Due: 2024-12-31", "by 12/31/2024", etc.
+  const datePatterns = [
+    /(?:due|deadline|by|target)\s*(?:date)?\s*:\s*(\d{4}-\d{2}-\d{2})/i, // ISO format
+    /(?:due|deadline|by|target)\s*(?:date)?\s*:\s*(\d{1,2}[\/\-]\d{1,2}(?:\/\d{2,4})?)/i, // MM/DD or MM/DD/YYYY
+    /\b(?:by|before|until)\s+(\d{4}-\d{2}-\d{2})\b/i, // ISO format standalone
+    /\b(?:by|before|until)\s+(\d{1,2}[\/\-]\d{1,2}(?:\/\d{2,4})?)\b/i // MM/DD format standalone
+  ];
+
+  for (const pattern of datePatterns) {
+    const match = cleanText.match(pattern);
+    if (match && match[1]) {
+      let dateStr = match[1].trim();
+      // Convert MM/DD/YYYY to ISO format if needed
+      if (dateStr.includes('/') || dateStr.includes('-')) {
+        const parts = dateStr.split(/[\/\-]/);
+        if (parts.length === 3) {
+          const year = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+          dueDate = `${year}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+        } else if (parts.length === 2) {
+          // MM/DD - assume current year
+          const year = new Date().getFullYear();
+          dueDate = `${year}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+        }
+      } else if (dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
+        dueDate = dateStr;
+      }
+      if (dueDate) {
+        cleanText = cleanText.replace(pattern, '').trim();
+        break;
+      }
+    }
+  }
+
+  // Clean up extra whitespace and punctuation
+  cleanText = cleanText.replace(/\s+/g, ' ').trim();
+  cleanText = cleanText.replace(/^[,\-•*]\s*/, '').trim();
+
+  return {
+    text: cleanText,
+    owner: owner,
+    dueDate: dueDate
+  };
+};
+
+/**
+ * Search for Jira user by display name or email
+ * @param {string} searchTerm - Display name or email to search
+ * @returns {Promise<string|null>} User accountId or null if not found
+ */
+const findJiraUser = async (searchTerm) => {
+  try {
+    const response = await api.asUser().requestJira(route`/rest/api/3/user/search?query=${encodeURIComponent(searchTerm)}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const users = await response.json();
+    if (users && users.length > 0) {
+      // Return the first matching user's accountId
+      return users[0].accountId;
+    }
+    return null;
+  } catch (error) {
+    console.error('Error searching for Jira user:', error);
+    return null;
+  }
+};
+
+/**
+ * Create Jira issues from action items
+ * @param {Object} req - Request object containing contentId, projectKey, and items
+ * @returns {Promise<Array>} Array of created issue objects with key and url
+ */
+resolver.define('createJiraIssuesFromActionItems', async (req) => {
+  const { contentId, projectKey, items } = req.payload;
+  
+  if (!contentId) {
+    throw new Error('contentId is required');
+  }
+  
+  if (!projectKey) {
+    throw new Error('projectKey is required');
+  }
+  
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    throw new Error('items array is required and must not be empty');
+  }
+
+  try {
+    const createdIssues = [];
+
+    // Get Confluence base URL from context to build page link
+    const confluenceBaseUrl = req.context?.extension?.baseUrl || '';
+
+    for (const item of items) {
+      if (!item.text || !item.text.trim()) {
+        continue; // Skip empty items
+      }
+
+      // Parse the action item
+      const parsed = parseActionItem(item.text);
+      const summary = parsed.text || item.text;
+      
+      // Build issue creation payload
+      const issuePayload = {
+        fields: {
+          project: {
+            key: projectKey
+          },
+          summary: summary.substring(0, 255), // Jira summary max length
+          issuetype: {
+            name: 'Task'
+          }
+        }
+      };
+
+      // Add assignee if owner is provided
+      if (item.owner || parsed.owner) {
+        const ownerName = item.owner || parsed.owner;
+        const accountId = await findJiraUser(ownerName);
+        if (accountId) {
+          issuePayload.fields.assignee = {
+            accountId: accountId
+          };
+        }
+      }
+
+      // Add due date if provided
+      if (item.dueDate || parsed.dueDate) {
+        const dueDate = item.dueDate || parsed.dueDate;
+        // Validate ISO date format
+        if (dueDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          issuePayload.fields.duedate = dueDate;
+        }
+      }
+
+      // Create the issue using route template literal tag
+      const createResponse = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(issuePayload)
+      });
+
+      if (!createResponse.ok) {
+        const errorText = await createResponse.text();
+        console.error(`Failed to create issue: ${createResponse.status} - ${errorText}`);
+        throw new Error(`Failed to create issue: ${createResponse.status}`);
+      }
+
+      const createdIssue = await createResponse.json();
+      const issueKey = createdIssue.key;
+      const issueUrl = `${confluenceBaseUrl}/browse/${issueKey}`;
+
+      // Add comment with link back to Confluence page
+      const pageUrl = confluenceBaseUrl ? `${confluenceBaseUrl}/wiki/spaces/*/pages/${contentId}` : '';
+      const commentBody = pageUrl 
+        ? `Created from SprintScribe AI analysis on Confluence page: ${pageUrl}`
+        : `Created from SprintScribe AI analysis (Content ID: ${contentId})`;
+
+      try {
+        await api.asUser().requestJira(route`/rest/api/3/issue/${issueKey}/comment`, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            body: {
+              type: 'doc',
+              version: 1,
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [
+                    {
+                      type: 'text',
+                      text: commentBody
+                    }
+                  ]
+                }
+              ]
+            }
+          })
+        });
+      } catch (commentError) {
+        // Log but don't fail if comment creation fails
+        console.error('Failed to add comment to issue:', commentError);
+      }
+
+      createdIssues.push({
+        key: issueKey,
+        url: issueUrl
+      });
+    }
+
+    // Store created issues
+    const createdIssuesKey = getCreatedIssuesKey(contentId);
+    const existingIssues = await storage.get(createdIssuesKey) || [];
+    const updatedIssues = [...existingIssues, ...createdIssues];
+    await storage.set(createdIssuesKey, updatedIssues);
+
+    return createdIssues;
+  } catch (error) {
+    console.error('Error creating Jira issues:', error);
+    throw error;
+  }
+});
+
+/**
+ * Get created issues for a page
+ * @param {Object} req - Request object containing contentId
+ * @returns {Promise<Array>} Array of created issue objects with key and url
+ */
+resolver.define('getCreatedIssues', async (req) => {
+  const { contentId } = req.payload;
+  
+  if (!contentId) {
+    return [];
+  }
+
+  try {
+    const createdIssuesKey = getCreatedIssuesKey(contentId);
+    const createdIssues = await storage.get(createdIssuesKey);
+    
+    return createdIssues || [];
+  } catch (error) {
+    console.error('Error getting created issues:', error);
+    return [];
   }
 });
 

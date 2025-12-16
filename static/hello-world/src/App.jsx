@@ -15,10 +15,19 @@ function App() {
     decisions: [],
     actionItems: []
   });
+  // Jira projects
+  const [jiraProjects, setJiraProjects] = useState([]);
+  const [selectedProjectKey, setSelectedProjectKey] = useState('');
+  // Selected action items with editable fields
+  const [selectedActionItems, setSelectedActionItems] = useState([]);
+  // Created issues
+  const [createdIssues, setCreatedIssues] = useState([]);
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
   // Analyzing state
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // Creating issues state
+  const [isCreatingIssues, setIsCreatingIssues] = useState(false);
   // Error state
   const [error, setError] = useState(null);
   // Debug info
@@ -57,6 +66,46 @@ function App() {
               decisions: analysisResult.decisions || [],
               actionItems: analysisResult.actionItems || []
             });
+            // Initialize selected action items (all checked by default)
+            setSelectedActionItems(
+              (analysisResult.actionItems || []).map((item, index) => ({
+                index,
+                text: item,
+                selected: true,
+                owner: '',
+                dueDate: ''
+              }))
+            );
+          }
+          
+          // Load created issues
+          const createdIssuesResult = await invoke('getCreatedIssues', { contentId: contentIdValue });
+          if (createdIssuesResult) {
+            setCreatedIssues(createdIssuesResult);
+          }
+          
+          // Load Jira projects
+          try {
+            const projectsResult = await invoke('listJiraProjects');
+            if (projectsResult && Array.isArray(projectsResult)) {
+              setJiraProjects(projectsResult);
+              setDebugInfo(prev => ({
+                ...prev,
+                lastAction: 'listJiraProjects',
+                lastResult: projectsResult
+              }));
+            } else {
+              console.warn('listJiraProjects returned invalid result:', projectsResult);
+            }
+          } catch (projectsError) {
+            console.error('Error loading Jira projects:', projectsError);
+            setError(`Failed to load Jira projects: ${projectsError.message || projectsError}`);
+            setDebugInfo(prev => ({
+              ...prev,
+              lastAction: 'listJiraProjects',
+              lastError: projectsError.message || String(projectsError)
+            }));
+            // Don't fail the whole load if projects can't be loaded
           }
           
           setDebugInfo(prev => ({
@@ -185,6 +234,15 @@ function App() {
           decisions: result.decisions || [],
           actionItems: result.actionItems || []
         });
+        // Update selected action items (all checked by default)
+        const newSelectedItems = (result.actionItems || []).map((item, index) => ({
+          index,
+          text: item,
+          selected: true,
+          owner: '',
+          dueDate: ''
+        }));
+        setSelectedActionItems(newSelectedItems);
         setDebugInfo(prev => ({
           ...prev,
           lastAction: 'analyzeTranscript',
@@ -202,6 +260,90 @@ function App() {
       }));
     } finally {
       setIsAnalyzing(false);
+    }
+  };
+
+  // Handler to toggle action item selection
+  const toggleActionItemSelection = (index) => {
+    setSelectedActionItems(prev => 
+      prev.map(item => 
+        item.index === index ? { ...item, selected: !item.selected } : item
+      )
+    );
+  };
+
+  // Handler to update action item owner
+  const updateActionItemOwner = (index, owner) => {
+    setSelectedActionItems(prev => 
+      prev.map(item => 
+        item.index === index ? { ...item, owner } : item
+      )
+    );
+  };
+
+  // Handler to update action item due date
+  const updateActionItemDueDate = (index, dueDate) => {
+    setSelectedActionItems(prev => 
+      prev.map(item => 
+        item.index === index ? { ...item, dueDate } : item
+      )
+    );
+  };
+
+  // Handler to create Jira issues
+  const handleCreateJiraIssues = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
+    if (!selectedProjectKey) {
+      setError('Please select a Jira project');
+      return;
+    }
+
+    const selectedItems = selectedActionItems.filter(item => item.selected);
+    if (selectedItems.length === 0) {
+      setError('Please select at least one action item');
+      return;
+    }
+
+    setIsCreatingIssues(true);
+    setError(null);
+
+    try {
+      const itemsToCreate = selectedItems.map(item => ({
+        text: item.text,
+        owner: item.owner || undefined,
+        dueDate: item.dueDate || undefined
+      }));
+
+      const result = await invoke('createJiraIssuesFromActionItems', {
+        contentId,
+        projectKey: selectedProjectKey,
+        items: itemsToCreate
+      });
+
+      if (result && Array.isArray(result)) {
+        // Update created issues list
+        setCreatedIssues(prev => [...prev, ...result]);
+        setDebugInfo(prev => ({
+          ...prev,
+          lastAction: 'createJiraIssuesFromActionItems',
+          lastResult: result,
+          lastError: null
+        }));
+      }
+    } catch (err) {
+      console.error('Error creating Jira issues:', err);
+      setError(`Failed to create Jira issues: ${err.message || err}`);
+      setDebugInfo(prev => ({
+        ...prev,
+        lastAction: 'createJiraIssuesFromActionItems',
+        lastError: err.message || String(err)
+      }));
+    } finally {
+      setIsCreatingIssues(false);
     }
   };
 
@@ -348,6 +490,60 @@ function App() {
           Stop Session
         </button>
       </div>
+
+      {/* Jira Project Selection */}
+      {sessionStatus === 'RUNNING' && (
+        <div style={{
+          marginBottom: '16px',
+          padding: '12px',
+          backgroundColor: '#F4F5F7',
+          border: '1px solid #DFE1E6',
+          borderRadius: '3px'
+        }}>
+          <label style={{
+            display: 'block',
+            marginBottom: '8px',
+            fontSize: '14px',
+            fontWeight: '500',
+            color: '#172B4D'
+          }}>
+            Jira Project:
+          </label>
+          <select
+            value={selectedProjectKey}
+            onChange={(e) => setSelectedProjectKey(e.target.value)}
+            disabled={isLoading || jiraProjects.length === 0}
+            style={{
+              width: '100%',
+              maxWidth: '400px',
+              padding: '6px 8px',
+              border: '1px solid #DFE1E6',
+              borderRadius: '3px',
+              fontSize: '14px',
+              backgroundColor: isLoading || jiraProjects.length === 0 ? '#F4F5F7' : '#FFFFFF',
+              cursor: isLoading || jiraProjects.length === 0 ? 'not-allowed' : 'pointer',
+              pointerEvents: isLoading || jiraProjects.length === 0 ? 'none' : 'auto'
+            }}
+          >
+            <option value="">Select a project...</option>
+            {jiraProjects.map(project => (
+              <option key={project.key} value={project.key}>
+                {project.name} ({project.key})
+              </option>
+            ))}
+          </select>
+          {isLoading && (
+            <div style={{ marginTop: '8px', fontSize: '12px', color: '#6B778C' }}>
+              Loading Jira projects...
+            </div>
+          )}
+          {jiraProjects.length === 0 && !isLoading && (
+            <div style={{ marginTop: '8px', fontSize: '12px', color: '#DE350B' }}>
+              No Jira projects available. Check console for errors or ensure you have Jira access.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Debug Panel */}
       {showDebug && (
@@ -540,14 +736,116 @@ function App() {
             fontSize: '14px',
             color: '#172B4D'
           }}>
-            {analysis.actionItems.length > 0 ? (
-              <ul style={{ margin: 0, paddingLeft: '20px' }}>
-                {analysis.actionItems.map((item, index) => (
-                  <li key={index} style={{ marginBottom: '8px' }}>
-                    {item}
-                  </li>
+            {selectedActionItems.length > 0 ? (
+              <div>
+                {selectedActionItems.map((item) => (
+                  <div key={`action-item-${item.index}`} style={{
+                    marginBottom: '12px',
+                    padding: '8px',
+                    border: '1px solid #DFE1E6',
+                    borderRadius: '3px',
+                    backgroundColor: item.selected ? '#FFFFFF' : '#F4F5F7'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '8px' }}>
+                      <input
+                        type="checkbox"
+                        id={`checkbox-${item.index}`}
+                        checked={item.selected}
+                        onChange={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggleActionItemSelection(item.index);
+                        }}
+                        disabled={sessionStatus !== 'RUNNING'}
+                        style={{
+                          marginTop: '4px',
+                          cursor: sessionStatus !== 'RUNNING' ? 'not-allowed' : 'pointer',
+                          pointerEvents: sessionStatus !== 'RUNNING' ? 'none' : 'auto',
+                          width: '18px',
+                          height: '18px',
+                          flexShrink: 0
+                        }}
+                      />
+                      <label
+                        htmlFor={`checkbox-${item.index}`}
+                        style={{
+                          flex: 1,
+                          fontSize: '13px',
+                          cursor: sessionStatus !== 'RUNNING' ? 'default' : 'pointer',
+                          margin: 0,
+                          userSelect: 'none'
+                        }}
+                        onClick={(e) => {
+                          if (sessionStatus === 'RUNNING') {
+                            e.preventDefault();
+                            toggleActionItemSelection(item.index);
+                          }
+                        }}
+                      >
+                        {item.text}
+                      </label>
+                    </div>
+                    {item.selected && sessionStatus === 'RUNNING' && (
+                      <div style={{ marginLeft: '24px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                        <div style={{ flex: 1, minWidth: '150px' }}>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#6B778C', marginBottom: '4px' }}>
+                            Owner:
+                          </label>
+                          <input
+                            type="text"
+                            value={item.owner}
+                            onChange={(e) => updateActionItemOwner(item.index, e.target.value)}
+                            placeholder="Name or email"
+                            style={{
+                              width: '100%',
+                              padding: '4px 6px',
+                              fontSize: '12px',
+                              border: '1px solid #DFE1E6',
+                              borderRadius: '3px'
+                            }}
+                          />
+                        </div>
+                        <div style={{ flex: 1, minWidth: '150px' }}>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#6B778C', marginBottom: '4px' }}>
+                            Due Date:
+                          </label>
+                          <input
+                            type="date"
+                            value={item.dueDate}
+                            onChange={(e) => updateActionItemDueDate(item.index, e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '4px 6px',
+                              fontSize: '12px',
+                              border: '1px solid #DFE1E6',
+                              borderRadius: '3px'
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 ))}
-              </ul>
+                {sessionStatus === 'RUNNING' && (
+                  <button
+                    onClick={handleCreateJiraIssues}
+                    disabled={!selectedProjectKey || selectedActionItems.filter(item => item.selected).length === 0 || isCreatingIssues}
+                    style={{
+                      marginTop: '12px',
+                      padding: '8px 16px',
+                      fontSize: '14px',
+                      fontWeight: '500',
+                      color: '#FFFFFF',
+                      backgroundColor: (!selectedProjectKey || selectedActionItems.filter(item => item.selected).length === 0 || isCreatingIssues) ? '#C1C7D0' : '#0052CC',
+                      border: 'none',
+                      borderRadius: '3px',
+                      cursor: (!selectedProjectKey || selectedActionItems.filter(item => item.selected).length === 0 || isCreatingIssues) ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    {isCreatingIssues ? 'Creating Issues...' : 'Create Jira Issues'}
+                  </button>
+                )}
+              </div>
             ) : (
               <div style={{ color: '#6B778C', fontStyle: 'italic' }}>
                 No action items found yet. Analyze a transcript to extract action items.
@@ -556,6 +854,52 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* Created Issues Section */}
+      {createdIssues.length > 0 && (
+        <div style={{
+          marginTop: '24px',
+          padding: '16px',
+          border: '1px solid #DFE1E6',
+          borderRadius: '3px',
+          backgroundColor: '#FFFFFF'
+        }}>
+          <h2 style={{
+            margin: '0 0 12px 0',
+            fontSize: '16px',
+            fontWeight: '600',
+            color: '#172B4D',
+            borderBottom: '1px solid #DFE1E6',
+            paddingBottom: '8px'
+          }}>
+            Created Jira Issues
+          </h2>
+          <div style={{
+            fontSize: '14px',
+            color: '#172B4D'
+          }}>
+            <ul style={{ margin: 0, paddingLeft: '20px' }}>
+              {createdIssues.map((issue, index) => (
+                <li key={index} style={{ marginBottom: '8px' }}>
+                  <a
+                    href={issue.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      color: '#0052CC',
+                      textDecoration: 'none'
+                    }}
+                    onMouseOver={(e) => e.target.style.textDecoration = 'underline'}
+                    onMouseOut={(e) => e.target.style.textDecoration = 'none'}
+                  >
+                    {issue.key}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
