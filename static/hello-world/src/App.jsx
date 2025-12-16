@@ -1,11 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@forge/bridge';
+import { view } from '@forge/bridge';
 
 function App() {
   // Session status: 'IDLE' | 'RUNNING'
   const [sessionStatus, setSessionStatus] = useState('IDLE');
+  // Content ID from context
+  const [contentId, setContentId] = useState(null);
+  // Transcript text
+  const [transcriptText, setTranscriptText] = useState('');
+  // Analysis results
+  const [analysis, setAnalysis] = useState({
+    suggestions: [],
+    decisions: [],
+    actionItems: []
+  });
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
+  // Analyzing state
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   // Error state
   const [error, setError] = useState(null);
   // Debug info
@@ -16,29 +29,51 @@ function App() {
   });
   const [showDebug, setShowDebug] = useState(false);
 
-  // Load session state on mount
+  // Load contentId, session state, and analysis on mount
   useEffect(() => {
-    const loadSessionState = async () => {
+    const loadInitialData = async () => {
       try {
         setIsLoading(true);
         setError(null);
         
-        const result = await invoke('getSessionState');
+        // Get contentId from context
+        const context = await view.getContext();
+        const contentIdValue = context?.extension?.content?.id || context?.content?.id;
         
-        if (result && result.status) {
-          setSessionStatus(result.status);
+        if (contentIdValue) {
+          setContentId(contentIdValue);
+          
+          // Load session state (per-page)
+          const sessionResult = await invoke('getSessionState', { contentId: contentIdValue });
+          if (sessionResult && sessionResult.status) {
+            setSessionStatus(sessionResult.status);
+          }
+          
+          // Load analysis
+          const analysisResult = await invoke('getAnalysis', { contentId: contentIdValue });
+          if (analysisResult) {
+            setAnalysis({
+              suggestions: analysisResult.suggestions || [],
+              decisions: analysisResult.decisions || [],
+              actionItems: analysisResult.actionItems || []
+            });
+          }
+          
           setDebugInfo(prev => ({
             ...prev,
-            lastAction: 'getSessionState',
-            lastResult: result
+            lastAction: 'loadInitialData',
+            lastResult: { contentId: contentIdValue, session: sessionResult, analysis: analysisResult }
           }));
+        } else {
+          console.warn('Could not get content ID from context:', context);
+          setError('Could not determine page ID');
         }
       } catch (err) {
-        console.error('Error loading session state:', err);
-        setError(`Failed to load session state: ${err.message || err}`);
+        console.error('Error loading initial data:', err);
+        setError(`Failed to load data: ${err.message || err}`);
         setDebugInfo(prev => ({
           ...prev,
-          lastAction: 'getSessionState',
+          lastAction: 'loadInitialData',
           lastError: err.message || String(err)
         }));
       } finally {
@@ -46,24 +81,29 @@ function App() {
       }
     };
 
-    loadSessionState();
+    loadInitialData();
   }, []);
 
   // Handler to start the session with optimistic update
   const handleStartSession = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
     // Optimistic update
     const previousStatus = sessionStatus;
     setSessionStatus('RUNNING');
     setError(null);
 
     try {
-      const result = await invoke('startSession');
+      const result = await invoke('setSessionState', { contentId, status: 'RUNNING' });
       
       if (result && result.status) {
         setSessionStatus(result.status);
         setDebugInfo(prev => ({
           ...prev,
-          lastAction: 'startSession',
+          lastAction: 'setSessionState',
           lastResult: result,
           lastError: null
         }));
@@ -75,7 +115,7 @@ function App() {
       setError(`Failed to start session: ${err.message || err}`);
       setDebugInfo(prev => ({
         ...prev,
-        lastAction: 'startSession',
+        lastAction: 'setSessionState',
         lastError: err.message || String(err)
       }));
     }
@@ -83,19 +123,24 @@ function App() {
 
   // Handler to stop the session with optimistic update
   const handleStopSession = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
     // Optimistic update
     const previousStatus = sessionStatus;
     setSessionStatus('IDLE');
     setError(null);
 
     try {
-      const result = await invoke('stopSession');
+      const result = await invoke('setSessionState', { contentId, status: 'IDLE' });
       
       if (result && result.status) {
         setSessionStatus(result.status);
         setDebugInfo(prev => ({
           ...prev,
-          lastAction: 'stopSession',
+          lastAction: 'setSessionState',
           lastResult: result,
           lastError: null
         }));
@@ -107,9 +152,56 @@ function App() {
       setError(`Failed to stop session: ${err.message || err}`);
       setDebugInfo(prev => ({
         ...prev,
-        lastAction: 'stopSession',
+        lastAction: 'setSessionState',
         lastError: err.message || String(err)
       }));
+    }
+  };
+
+  // Handler to analyze transcript
+  const handleAnalyze = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
+    if (!transcriptText || !transcriptText.trim()) {
+      setError('Please enter transcript text');
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setError(null);
+
+    try {
+      const result = await invoke('analyzeTranscript', {
+        contentId,
+        transcriptText: transcriptText.trim()
+      });
+
+      if (result) {
+        setAnalysis({
+          suggestions: result.suggestions || [],
+          decisions: result.decisions || [],
+          actionItems: result.actionItems || []
+        });
+        setDebugInfo(prev => ({
+          ...prev,
+          lastAction: 'analyzeTranscript',
+          lastResult: result,
+          lastError: null
+        }));
+      }
+    } catch (err) {
+      console.error('Error analyzing transcript:', err);
+      setError(`Failed to analyze transcript: ${err.message || err}`);
+      setDebugInfo(prev => ({
+        ...prev,
+        lastAction: 'analyzeTranscript',
+        lastError: err.message || String(err)
+      }));
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
@@ -269,6 +361,7 @@ function App() {
           fontFamily: 'monospace'
         }}>
           <div style={{ fontWeight: '600', marginBottom: '8px' }}>Debug Info:</div>
+          <div><strong>Content ID:</strong> {contentId || 'Not available'}</div>
           <div><strong>Last Action:</strong> {debugInfo.lastAction || 'None'}</div>
           {debugInfo.lastResult && (
             <div style={{ marginTop: '4px' }}>
@@ -310,13 +403,43 @@ function App() {
           }}>
             Transcript Input
           </h2>
-          <div style={{
-            color: '#6B778C',
-            fontSize: '14px',
-            fontStyle: 'italic'
-          }}>
-            {/* Empty panel - content will be added later */}
-          </div>
+          <textarea
+            value={transcriptText}
+            onChange={(e) => setTranscriptText(e.target.value)}
+            placeholder={sessionStatus !== 'RUNNING' ? 'Start session to enter transcript' : 'Paste transcript text here...'}
+            disabled={sessionStatus !== 'RUNNING'}
+            style={{
+              width: '100%',
+              minHeight: '120px',
+              padding: '8px',
+              border: '1px solid #DFE1E6',
+              borderRadius: '3px',
+              fontSize: '14px',
+              fontFamily: 'inherit',
+              resize: 'vertical',
+              backgroundColor: sessionStatus !== 'RUNNING' ? '#F4F5F7' : '#FFFFFF',
+              color: sessionStatus !== 'RUNNING' ? '#6B778C' : '#172B4D',
+              cursor: sessionStatus !== 'RUNNING' ? 'not-allowed' : 'text'
+            }}
+          />
+          <button
+            onClick={handleAnalyze}
+            disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing}
+            style={{
+              marginTop: '12px',
+              padding: '8px 16px',
+              fontSize: '14px',
+              fontWeight: '500',
+              color: '#FFFFFF',
+              backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? '#C1C7D0' : '#0052CC',
+              border: 'none',
+              borderRadius: '3px',
+              cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? 'not-allowed' : 'pointer',
+              transition: 'background-color 0.2s'
+            }}
+          >
+            {isAnalyzing ? 'Analyzing...' : 'Analyze'}
+          </button>
         </div>
 
         {/* AI Suggestions Panel */}
@@ -338,11 +461,22 @@ function App() {
             AI Suggestions
           </h2>
           <div style={{
-            color: '#6B778C',
             fontSize: '14px',
-            fontStyle: 'italic'
+            color: '#172B4D'
           }}>
-            {/* Empty panel - content will be added later */}
+            {analysis.suggestions.length > 0 ? (
+              <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                {analysis.suggestions.map((suggestion, index) => (
+                  <li key={index} style={{ marginBottom: '8px' }}>
+                    {suggestion}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div style={{ color: '#6B778C', fontStyle: 'italic' }}>
+                No suggestions yet. Analyze a transcript to see insights.
+              </div>
+            )}
           </div>
         </div>
 
@@ -365,11 +499,22 @@ function App() {
             Decisions Log
           </h2>
           <div style={{
-            color: '#6B778C',
             fontSize: '14px',
-            fontStyle: 'italic'
+            color: '#172B4D'
           }}>
-            {/* Empty panel - content will be added later */}
+            {analysis.decisions.length > 0 ? (
+              <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                {analysis.decisions.map((decision, index) => (
+                  <li key={index} style={{ marginBottom: '8px' }}>
+                    {decision}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div style={{ color: '#6B778C', fontStyle: 'italic' }}>
+                No decisions found yet. Analyze a transcript to extract decisions.
+              </div>
+            )}
           </div>
         </div>
 
@@ -392,11 +537,22 @@ function App() {
             Action Items
           </h2>
           <div style={{
-            color: '#6B778C',
             fontSize: '14px',
-            fontStyle: 'italic'
+            color: '#172B4D'
           }}>
-            {/* Empty panel - content will be added later */}
+            {analysis.actionItems.length > 0 ? (
+              <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                {analysis.actionItems.map((item, index) => (
+                  <li key={index} style={{ marginBottom: '8px' }}>
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div style={{ color: '#6B778C', fontStyle: 'italic' }}>
+                No action items found yet. Analyze a transcript to extract action items.
+              </div>
+            )}
           </div>
         </div>
       </div>
