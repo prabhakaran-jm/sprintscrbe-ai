@@ -860,4 +860,39 @@ resolver.define('generateSummary', async (req) => {
   }
 });
 
+/**
+ * Clear all session data for a page (analysis, meeting, created issues)
+ * Useful for starting fresh with a new transcript
+ * @param {Object} req - Request object containing contentId
+ * @returns {Promise<Object>} Success confirmation
+ */
+resolver.define('clearSessionData', async (req) => {
+  const { contentId } = req.payload;
+  
+  if (!contentId) {
+    throw new Error('contentId is required');
+  }
+
+  try {
+    // Clear all storage keys for this contentId
+    const sessionKey = getSessionKey(contentId);
+    const analysisKey = getAnalysisKey(contentId);
+    const meetingKey = getMeetingKey(contentId);
+    const createdIssuesKey = getCreatedIssuesKey(contentId);
+    
+    // Delete all keys (storage.delete returns undefined if key doesn't exist, which is fine)
+    await Promise.all([
+      storage.delete(sessionKey),
+      storage.delete(analysisKey),
+      storage.delete(meetingKey),
+      storage.delete(createdIssuesKey)
+    ]);
+    
+    return { success: true, message: 'Session data cleared successfully' };
+  } catch (error) {
+    console.error('Error clearing session data:', error);
+    throw error;
+  }
+});
+
 export const handler = resolver.getDefinitions();

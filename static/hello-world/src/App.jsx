@@ -48,6 +48,10 @@ function App() {
     lastError: null
   });
   const [showDebug, setShowDebug] = useState(false);
+  // UI message for user guidance (info/error/success)
+  const [uiMessage, setUiMessage] = useState(null);
+  // Track if Analyze has been run in the current session (not just loaded from storage)
+  const [hasAnalyzedInSession, setHasAnalyzedInSession] = useState(false);
 
   // Load contentId, session state, and analysis on mount
   useEffect(() => {
@@ -117,6 +121,8 @@ function App() {
                 decisions: analysisResult.decisions || [],
                 actionItems: analysisResult.actionItems || []
               });
+              // Note: If analysis exists from storage, Generate Summary button will be enabled
+              // This is expected behavior for per-page persistence
               // Initialize selected action items (all checked by default)
               // Handle both old format (string) and new format (object with confidence)
               setSelectedActionItems(
@@ -329,6 +335,7 @@ function App() {
 
     setIsAnalyzing(true);
     setError(null);
+    setUiMessage(null); // Clear any existing message
 
     try {
       const result = await invoke('analyzeTranscript', {
@@ -342,6 +349,15 @@ function App() {
           decisions: result.decisions || [],
           actionItems: result.actionItems || []
         });
+        // Mark that Analyze has been run in this session
+        setHasAnalyzedInSession(true);
+        // Show success message
+        setUiMessage({
+          type: 'success',
+          text: `Analysis complete. Found ${result.suggestions?.length || 0} suggestions, ${result.decisions?.length || 0} decisions, and ${result.actionItems?.length || 0} action items.`
+        });
+        // Auto-clear after 4 seconds
+        setTimeout(() => setUiMessage(null), 4000);
         // Update selected action items (all checked by default)
         // Handle both old format (string) and new format (object with confidence)
         const newSelectedItems = (result.actionItems || []).map((item, index) => {
@@ -465,6 +481,23 @@ function App() {
       return;
     }
 
+    // Guard condition: Check if Analyze has been run in the current session
+    // If not, show info message to guide user immediately
+    // Note: We check hasAnalyzedInSession instead of just analysis data because
+    // analysis might exist from storage (per-page persistence), but user should
+    // still run Analyze in the current session for fresh results
+    if (!hasAnalyzedInSession) {
+      setUiMessage({
+        type: 'info',
+        text: 'Run Analyze first to extract decisions and action items for the summary.'
+      });
+      // Auto-clear after 6 seconds
+      setTimeout(() => setUiMessage(null), 6000);
+      // Return early - don't proceed with summary generation
+      setIsGeneratingSummary(false);
+      return;
+    }
+
     setIsGeneratingSummary(true);
     setError(null);
 
@@ -488,10 +521,24 @@ function App() {
           lastResult: result,
           lastError: null
         }));
+        // Show success message
+        setUiMessage({
+          type: 'success',
+          text: 'Summary generated.'
+        });
+        // Auto-clear after 4 seconds
+        setTimeout(() => setUiMessage(null), 4000);
       }
     } catch (err) {
       console.error('Error generating summary:', err);
       setError(`Failed to generate summary: ${err.message || err}`);
+      // Show error message
+      setUiMessage({
+        type: 'error',
+        text: `Failed to generate summary: ${err.message || err}`
+      });
+      // Auto-clear after 6 seconds
+      setTimeout(() => setUiMessage(null), 6000);
       setDebugInfo(prev => ({
         ...prev,
         lastAction: 'generateSummary',
@@ -499,6 +546,64 @@ function App() {
       }));
     } finally {
       setIsGeneratingSummary(false);
+    }
+  };
+
+  // Handler to clear session data
+  const handleClearSession = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
+    // Confirm with user (simple confirmation)
+    if (!window.confirm('Clear all session data? This will remove analysis, summary, and created issues for this page.')) {
+      return;
+    }
+
+    try {
+      await invoke('clearSessionData', { contentId });
+      
+      // Reset all state
+      setAnalysis({
+        suggestions: [],
+        decisions: [],
+        actionItems: []
+      });
+      setSelectedActionItems([]);
+      setSummary(null);
+      setCreatedIssues([]);
+      setMeeting({
+        transcriptText: '',
+        summary: '',
+        createdIssueKeys: [],
+        updatedAt: null
+      });
+      setHasAnalyzedInSession(false);
+      setUiMessage(null);
+      setError(null);
+      
+      // Show success message
+      setUiMessage({
+        type: 'success',
+        text: 'Session data cleared. Ready for new transcript.'
+      });
+      setTimeout(() => setUiMessage(null), 3000);
+      
+      setDebugInfo(prev => ({
+        ...prev,
+        lastAction: 'clearSessionData',
+        lastResult: { success: true },
+        lastError: null
+      }));
+    } catch (err) {
+      console.error('Error clearing session data:', err);
+      setError(`Failed to clear session data: ${err.message || err}`);
+      setUiMessage({
+        type: 'error',
+        text: `Failed to clear session data: ${err.message || err}`
+      });
+      setTimeout(() => setUiMessage(null), 6000);
     }
   };
 
@@ -681,7 +786,8 @@ function App() {
       <div style={{ 
         marginBottom: '24px',
         display: 'flex',
-        gap: '12px'
+        gap: '12px',
+        flexWrap: 'wrap'
       }}>
         <button
           onClick={handleStartSession}
@@ -736,6 +842,34 @@ function App() {
           }}
         >
           Stop Session
+        </button>
+        <button
+          onClick={handleClearSession}
+          disabled={!contentId}
+          style={{
+            padding: '8px 16px',
+            fontSize: '14px',
+            fontWeight: '500',
+            color: '#FFFFFF',
+            backgroundColor: !contentId ? '#C1C7D0' : '#6B778C',
+            border: 'none',
+            borderRadius: '3px',
+            cursor: !contentId ? 'not-allowed' : 'pointer',
+            transition: 'background-color 0.2s'
+          }}
+          onMouseOver={(e) => {
+            if (contentId) {
+              e.target.style.backgroundColor = '#42526E';
+            }
+          }}
+          onMouseOut={(e) => {
+            if (contentId) {
+              e.target.style.backgroundColor = '#6B778C';
+            }
+          }}
+          title="Clear all session data (analysis, summary, created issues) for this page"
+        >
+          Clear Session
         </button>
       </div>
 
@@ -945,41 +1079,77 @@ function App() {
               cursor: sessionStatus !== 'RUNNING' ? 'not-allowed' : 'text'
             }}
           />
-          <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-            <button
-              onClick={handleAnalyze}
-              disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing}
-              style={{
-                padding: '8px 16px',
-                fontSize: '14px',
-                fontWeight: '500',
-                color: '#FFFFFF',
-                backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? '#C1C7D0' : '#0052CC',
-                border: 'none',
-                borderRadius: '3px',
-                cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? 'not-allowed' : 'pointer',
-                transition: 'background-color 0.2s'
-              }}
-            >
-              {isAnalyzing ? 'Analyzing...' : 'Analyze'}
-            </button>
-            <button
-              onClick={handleGenerateSummary}
-              disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary}
-              style={{
-                padding: '8px 16px',
-                fontSize: '14px',
-                fontWeight: '500',
-                color: '#FFFFFF',
-                backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary) ? '#C1C7D0' : '#36B37E',
-                border: 'none',
-                borderRadius: '3px',
-                cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary) ? 'not-allowed' : 'pointer',
-                transition: 'background-color 0.2s'
-              }}
-            >
-              {isGeneratingSummary ? 'Generating...' : 'Generate Summary'}
-            </button>
+          
+          {/* UI Message - shows info/error/success messages above buttons */}
+          {uiMessage && (
+            <div style={{
+              marginTop: '12px',
+              marginBottom: '8px',
+              padding: '8px 12px',
+              borderRadius: '3px',
+              fontSize: '13px',
+              backgroundColor: uiMessage.type === 'error' ? '#FFEBE6' : 
+                               uiMessage.type === 'success' ? '#E3FCEF' : 
+                               '#E3F5FF',
+              border: `1px solid ${uiMessage.type === 'error' ? '#DE350B' : 
+                                  uiMessage.type === 'success' ? '#36B37E' : 
+                                  '#0052CC'}`,
+              color: uiMessage.type === 'error' ? '#DE350B' : 
+                     uiMessage.type === 'success' ? '#006644' : 
+                     '#0052CC'
+            }}>
+              {uiMessage.text}
+            </div>
+          )}
+          
+          <div style={{ display: 'flex', gap: '8px', marginTop: uiMessage ? '0' : '12px', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                onClick={handleAnalyze}
+                disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  color: '#FFFFFF',
+                  backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? '#C1C7D0' : '#0052CC',
+                  border: 'none',
+                  borderRadius: '3px',
+                  cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? 'not-allowed' : 'pointer',
+                  transition: 'background-color 0.2s'
+                }}
+              >
+                {isAnalyzing ? 'Analyzing...' : 'Analyze'}
+              </button>
+              <button
+                onClick={handleGenerateSummary}
+                disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary || !hasAnalyzedInSession}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  color: '#FFFFFF',
+                  backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary || !hasAnalyzedInSession) ? '#C1C7D0' : '#36B37E',
+                  border: 'none',
+                  borderRadius: '3px',
+                  cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isGeneratingSummary || !hasAnalyzedInSession) ? 'not-allowed' : 'pointer',
+                  transition: 'background-color 0.2s'
+                }}
+              >
+                {isGeneratingSummary ? 'Generating...' : 'Generate Summary'}
+              </button>
+            </div>
+            {/* Helper text when Generate Summary is disabled due to missing analysis */}
+            {sessionStatus === 'RUNNING' && transcriptText.trim() && !hasAnalyzedInSession && (
+              <div style={{
+                fontSize: '11px',
+                color: '#6B778C',
+                fontStyle: 'italic',
+                marginTop: '4px'
+              }}>
+                Analyze the transcript first.
+              </div>
+            )}
           </div>
         </div>
 
