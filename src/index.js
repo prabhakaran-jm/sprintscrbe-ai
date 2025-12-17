@@ -603,16 +603,61 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
         }
       }
       
-      // Build enriched description
-      const descriptionParts = [];
-      // Use effectivePageUrl if available, otherwise show Content ID (backward compatible)
-      descriptionParts.push(`Source: ${sourceUrl}`);
-      if (meetingSummaryText) {
-        descriptionParts.push(`\n\nMeeting Summary:\n${meetingSummaryText}`);
-      }
-      descriptionParts.push(`\n\nExtracted from transcript: ${item.originalLine || item.text}`);
+      // Build enriched description as structured ADF content
+      // This allows the Confluence Source URL to be a clickable link
+      const descriptionContent = [];
       
-      const description = descriptionParts.join('');
+      // Source paragraph with clickable link (if URL is valid) or plain text (if Content ID fallback)
+      const isUrl = sourceUrl && (sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://'));
+      const sourceParagraph = {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'Source: ' }
+        ]
+      };
+      
+      if (isUrl) {
+        // Make the URL a clickable link with friendly label text
+        sourceParagraph.content.push({
+          type: 'text',
+          text: 'SprintScribe meeting page',
+          marks: [
+            { type: 'link', attrs: { href: sourceUrl } }
+          ]
+        });
+      } else {
+        // Fallback: Content ID as plain text
+        sourceParagraph.content.push({
+          type: 'text',
+          text: sourceUrl || `Content ID: ${contentId}`
+        });
+      }
+      descriptionContent.push(sourceParagraph);
+      
+      // Meeting Summary paragraph (if available)
+      if (meetingSummaryText) {
+        descriptionContent.push({
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'Meeting Summary:' }
+          ]
+        });
+        descriptionContent.push({
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: meetingSummaryText }
+          ]
+        });
+      }
+      
+      // Extracted from transcript paragraph
+      descriptionContent.push({
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'Extracted from transcript: ' },
+          { type: 'text', text: item.originalLine || item.text }
+        ]
+      });
       
       // Build issue creation payload
       const issuePayload = {
@@ -627,17 +672,7 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
           description: {
             type: 'doc',
             version: 1,
-            content: [
-              {
-                type: 'paragraph',
-                content: [
-                  {
-                    type: 'text',
-                    text: description
-                  }
-                ]
-              }
-            ]
+            content: descriptionContent
           }
         }
       };
@@ -703,10 +738,38 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
       // Fallback to just the key if siteUrl is missing (backward compatible)
       const issueUrl = finalSiteUrl ? `${finalSiteUrl}/browse/${issueKey}` : issueKey;
 
-      // Add comment with link back to Confluence page
-      const commentBody = effectivePageUrl 
-        ? `Created from SprintScribe AI analysis on Confluence page: ${effectivePageUrl}`
-        : `Created from SprintScribe AI analysis (Content ID: ${contentId})`;
+      // Add comment with clickable link back to Confluence page
+      // Build comment as structured ADF content so the URL is clickable
+      const isCommentUrl = effectivePageUrl && (effectivePageUrl.startsWith('http://') || effectivePageUrl.startsWith('https://'));
+      const commentContent = [];
+      
+      if (isCommentUrl) {
+        // Comment with clickable Confluence page link
+        commentContent.push({
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'Created from SprintScribe AI analysis on Confluence page: ' },
+            {
+              type: 'text',
+              text: effectivePageUrl,
+              marks: [
+                { type: 'link', attrs: { href: effectivePageUrl } }
+              ]
+            }
+          ]
+        });
+      } else {
+        // Fallback: Content ID as plain text
+        commentContent.push({
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: `Created from SprintScribe AI analysis (Content ID: ${contentId})`
+            }
+          ]
+        });
+      }
 
       try {
         await api.asUser().requestJira(route`/rest/api/3/issue/${issueKey}/comment`, {
@@ -719,17 +782,7 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
             body: {
               type: 'doc',
               version: 1,
-              content: [
-                {
-                  type: 'paragraph',
-                  content: [
-                    {
-                      type: 'text',
-                      text: commentBody
-                    }
-                  ]
-                }
-              ]
+              content: commentContent
             }
           })
         });
