@@ -1,6 +1,6 @@
-# SprintScribe AI — Pit Crew Console
+# SprintScribe AI - Pit Crew Console
 
-**SprintScribe AI** is a Forge app for Confluence that transforms meeting transcripts into actionable Jira issues. Think of it as your "pit crew" for meetings—quickly extracting decisions, action items, and insights, then converting them into trackable tasks with full traceability back to the source.
+**SprintScribe AI** is a Forge app for Confluence that transforms meeting transcripts into actionable Jira issues. Think of it as your "pit crew" for meetings - quickly extracting decisions, action items, and insights, then converting them into trackable tasks with full traceability back to the source.
 
 ## What SprintScribe AI Does
 
@@ -140,7 +140,7 @@ npm run build
 ### 3. Deploy to Development
 
 ```bash
-forge deploy --non-interactive --e development
+forge deploy --non-interactive -e development
 ```
 
 ### 4. Install on Your Site
@@ -175,7 +175,7 @@ forge lint
 ### Deploy
 
 ```bash
-forge deploy --non-interactive --e development
+forge deploy --non-interactive -e development
 ```
 
 ### Tunneling (for local development)
