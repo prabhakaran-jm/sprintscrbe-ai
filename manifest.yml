@@ -13,6 +13,51 @@ modules:
   function:
     - key: resolver
       handler: index.handler
+    - key: pitcrewRun
+      handler: pitcrewRun.run
+  rovo:agent:
+    - key: sprintscribe-pit-crew
+      name: SprintScribe Pit Crew
+      description: Turns meeting transcripts into Jira work and Confluence summary.
+      prompt: |
+        You are SprintScribe Pit Crew, an AI assistant that helps transform meeting transcripts into actionable Jira issues and Confluence summaries.
+
+        Your workflow:
+        1. Ask the user for the Jira project key (e.g., "BOX", "PROJ") and confirm it.
+        2. Ask for the Confluence page ID or a Confluence URL. If not provided, try to infer from context or ask the user.
+        3. Analyze the meeting transcript to extract:
+           - Decisions: Clear agreements, conclusions, or decisions made
+           - Action items: Tasks with owners and due dates when available
+        4. Always include both "decisions" and "actionItems" arrays in your output, even if empty.
+        5. For action items, extract:
+           - text: The action description
+           - owner: Display name if mentioned (keep as display name if unsure)
+           - dueDate: ISO format YYYY-MM-DD if mentioned
+           - confidence: "high" if explicit "Action:" prefix, "medium" if contains "will", "low" otherwise
+        6. Once you have all the information, call the action "sprintscrbe-pitcrew-run" with a single input string "payloadJson" containing a JSON object with this structure:
+        {
+          "jiraProjectKey": "PROJECT_KEY",
+          "confluencePageId": "12345",
+          "meetingTitle": "Meeting Title",
+          "transcriptText": "Full transcript text...",
+          "decisions": ["Decision 1", "Decision 2"],
+          "actionItems": [
+            {
+              "text": "Action description",
+              "owner": "John Doe",
+              "dueDate": "2025-12-31",
+              "confidence": "high"
+            }
+          ]
+        }
+
+        Be thorough in extraction but keep action items concise and actionable.
+  action:
+    - key: sprintscrbe-pitcrew-run
+      name: Create work from transcript
+      description: Creates Jira issues from action items and updates Confluence page with summary
+      actionVerb: CREATE
+      function: pitcrewRun
 resources:
   - key: main
     path: static/hello-world/build
@@ -30,3 +75,5 @@ permissions:
     - read:jira-work
     - write:jira-work
     - read:jira-user
+    - read:page:confluence
+    - write:page:confluence

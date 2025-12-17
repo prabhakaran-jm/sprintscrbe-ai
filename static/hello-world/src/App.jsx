@@ -7,6 +7,9 @@ function App() {
   const [sessionStatus, setSessionStatus] = useState('IDLE');
   // Content ID from context
   const [contentId, setContentId] = useState(null);
+  // Site URL and page URL for Jira issue enrichment
+  const [siteUrl, setSiteUrl] = useState(null);
+  const [pageUrl, setPageUrl] = useState(null);
   // Transcript text
   const [transcriptText, setTranscriptText] = useState('');
   // Analysis results
@@ -62,12 +65,75 @@ function App() {
         setIsLoading(true);
         setError(null);
         
-        // Get contentId from context
+        // Get contentId and URLs from context
         const context = await view.getContext();
         const contentIdValue = context?.extension?.content?.id || context?.content?.id;
         
+        // Extract site base URL (e.g., https://tenant.atlassian.net)
+        // Try multiple possible locations in context, including window.location as fallback
+        let rawBaseUrl = context?.extension?.baseUrl || 
+                        context?.baseUrl || 
+                        (context?.extension?.host ? `https://${context.extension.host}` : null);
+        
+        // If we got a CDN URL, try to extract hostname from it (e.g., _hostname_tenant.atlassian.net)
+        // This handles cases where Forge provides CDN URLs in the context
+        if (rawBaseUrl && rawBaseUrl.includes('_hostname_')) {
+          const hostnameMatch = rawBaseUrl.match(/_hostname_([^\/]+)/);
+          if (hostnameMatch && hostnameMatch[1]) {
+            rawBaseUrl = `https://${hostnameMatch[1]}`;
+          }
+        }
+        
+        // Fallback: try to extract from window.location if context didn't provide it
+        // In Forge Custom UI, window.location may be a CDN URL, so we need to extract the hostname from the path
+        if (!rawBaseUrl && typeof window !== 'undefined' && window.location) {
+          try {
+            const location = window.location;
+            // Check if URL contains _hostname_ pattern (CDN URL case)
+            if (location.href && location.href.includes('_hostname_')) {
+              const hostnameMatch = location.href.match(/_hostname_([^\/]+)/);
+              if (hostnameMatch && hostnameMatch[1]) {
+                rawBaseUrl = `https://${hostnameMatch[1]}`;
+              }
+            } else if (location.hostname && location.hostname.includes('.atlassian.net')) {
+              // Direct site URL (not CDN)
+              rawBaseUrl = `${location.protocol}//${location.hostname}`;
+            }
+          } catch (e) {
+            // Ignore errors
+          }
+        }
+        
+        // Normalize baseUrl to strip /wiki or any path (same logic as backend)
+        const baseUrl = rawBaseUrl ? (() => {
+          try {
+            const u = new URL(rawBaseUrl);
+            return `${u.protocol}//${u.host}`;
+          } catch {
+            return rawBaseUrl.replace(/\/wiki\/?$/, '').replace(/\/$/, '');
+          }
+        })() : null;
+        
+        // Extract or construct page URL
+        // Best effort: try to get full URL from context
+        // Note: We don't construct /wiki/pages/{contentId} as it's invalid without space key
+        // Backend will fetch space key from API if needed
+        let pageUrlValue = null;
+        if (context?.extension?.content?.url) {
+          // If full URL is available in context, use it (should include space key)
+          pageUrlValue = context.extension.content.url;
+        }
+        // Don't construct invalid URL - let backend fetch space key from API
+        
         if (contentIdValue) {
           setContentId(contentIdValue);
+          // Set URLs if available (will be passed to backend for Jira issue enrichment)
+          if (baseUrl) {
+            setSiteUrl(baseUrl);
+          }
+          if (pageUrlValue) {
+            setPageUrl(pageUrlValue);
+          }
           
           // Initialize variables for debug info
           let sessionResult = null;
@@ -794,7 +860,11 @@ Suggestion: Prepare rollback plan in case of issues.`
       const result = await invoke('createJiraIssuesFromActionItems', {
         contentId,
         projectKey: selectedProjectKey,
-        items: itemsToCreate
+        items: itemsToCreate,
+        // Pass siteUrl and pageUrl for proper URL construction in Jira issues
+        // These are optional - backend will fallback if not provided (backward compatible)
+        siteUrl: siteUrl || undefined,
+        pageUrl: pageUrl || undefined
       });
 
       if (result && Array.isArray(result)) {

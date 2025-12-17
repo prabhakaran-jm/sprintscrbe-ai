@@ -72,14 +72,21 @@ graph TB
     C -->|Jira API| E[Jira Cloud]
     C -->|route| F[Product APIs]
     
-    D -->|Per-page keys| G[sprintscrbe:contentId:*]
-    E -->|Issue creation| H[Jira Issues]
-    H -->|Links back| A
+    G[Rovo Chat] -->|AI Agent| H[Rovo Agent: SprintScribe Pit Crew]
+    H -->|action| I[Forge Action: pitcrewRun]
+    I -->|Jira API| E
+    I -->|Confluence API| A
+    
+    D -->|Per-page keys| J[sprintscrbe:contentId:*]
+    E -->|Issue creation| K[Jira Issues]
+    K -->|Links back| A
     
     style B fill:#0052CC,color:#fff
     style C fill:#36B37E,color:#fff
     style D fill:#FFAB00,color:#fff
     style E fill:#0052CC,color:#fff
+    style H fill:#7A869A,color:#fff
+    style I fill:#36B37E,color:#fff
 ```
 
 ## Tech Stack
@@ -98,7 +105,8 @@ graph TB
 ```
 sprintscrbe-ai/
 ├── src/
-│   └── index.js              # Backend resolvers
+│   ├── index.js              # Backend resolvers
+│   └── pitcrewRun.js         # Rovo Agent action handler
 ├── static/
 │   ├── hello-world/          # Main macro Custom UI
 │   │   └── src/
@@ -195,12 +203,54 @@ The app requires the following Forge scopes:
 - `read:jira-work` - Read Jira projects and issues
 - `write:jira-work` - Create Jira issues and comments
 - `read:jira-user` - Search for Jira users (for assignment)
+- `read:confluence-content.all` - Read Confluence pages (for Rovo Agent)
+- `write:confluence-content.all` - Update Confluence pages (for Rovo Agent)
+
+## AI via Rovo Agent
+
+SprintScribe AI includes a **Rovo Agent** that uses AI to extract decisions and action items from meeting transcripts, then automatically creates Jira issues and updates Confluence pages.
+
+### Using the Rovo Agent
+
+1. **Open Rovo Chat** in your Confluence or Jira instance
+2. **Invoke the agent**: Type `@SprintScribe Pit Crew` or mention the agent
+3. **Provide the transcript**: Paste or share your meeting transcript
+4. **Answer prompts**: The agent will ask for:
+   - Jira project key (e.g., "BOX", "PROJ")
+   - Confluence page ID or URL
+5. **Review and confirm**: The agent will extract decisions and action items
+6. **Automatic execution**: The agent will:
+   - Create Jira issues for each action item
+   - Assign owners (if found in Jira)
+   - Set due dates (if provided)
+   - Update the Confluence page with a summary section
+
+### Rovo Agent Features
+
+- **AI-powered extraction**: Uses LLM to identify decisions and action items more accurately than regex patterns
+- **Automatic Jira creation**: Creates issues directly from extracted action items
+- **Confluence integration**: Appends a "SprintScribe Pit Crew Summary" section to the page
+- **Smart user matching**: Attempts to match owner names to Jira users
+- **Full traceability**: Jira issues include source links, meeting context, and original transcript preview
+
+### Rovo Agent Demo Steps
+
+1. Open Rovo Chat in Confluence
+2. Type: `@SprintScribe Pit Crew help me process this meeting transcript`
+3. Paste your transcript when prompted
+4. Provide Jira project key when asked
+5. Provide Confluence page ID or URL when asked
+6. Review the extracted decisions and action items
+7. Confirm to create Jira issues and update the page
+8. Check the Confluence page for the new summary section
+9. Verify Jira issues were created with proper assignments
 
 ## Limitations
 
 ### Current Limitations
 
-- **Deterministic parsing**: Uses regex-based extraction, not AI/ML models
+- **Macro UI uses deterministic parsing**: The macro UI uses regex-based extraction, not AI/ML models
+- **Rovo Agent requires manual invocation**: Must be called via Rovo Chat
 - **Transcript input only**: Requires manual paste of transcript text
 - **No live meeting integration**: Future work to integrate with meeting platforms
 - **Single project selection**: Creates issues in one Jira project at a time
@@ -208,12 +258,12 @@ The app requires the following Forge scopes:
 
 ### Future Enhancements
 
-- AI/ML-based extraction for improved accuracy
 - Live meeting platform integrations (Zoom, Teams, etc.)
 - Multi-project issue creation
 - Advanced user matching and suggestions
 - Export capabilities (CSV, PDF)
 - Meeting templates and presets
+- Direct integration between macro UI and Rovo Agent
 
 ## Demo Transcripts
 

@@ -32,6 +32,23 @@ const getMeetingKey = (contentId) => {
 };
 
 /**
+ * Normalize site URL to base origin (strips /wiki or any path)
+ * Prevents issues where baseUrl might include /wiki, which would break Jira URLs
+ * @param {string} maybeUrl - URL that might include path segments
+ * @returns {string} Normalized base URL (e.g., https://tenant.atlassian.net)
+ */
+const normalizeSiteUrl = (maybeUrl) => {
+  if (!maybeUrl) return '';
+  try {
+    const u = new URL(maybeUrl);
+    return `${u.protocol}//${u.host}`; // strips /wiki or anything else
+  } catch {
+    // fallback if it's already like https://tenant.atlassian.net
+    return maybeUrl.replace(/\/wiki\/?$/, '').replace(/\/$/, '');
+  }
+};
+
+/**
  * Get the current session state for a page
  * @param {Object} req - Request object containing contentId
  * @returns {Promise<Object>} Session state object
@@ -467,7 +484,7 @@ const findJiraUser = async (searchTerm) => {
  * @returns {Promise<Array>} Array of created issue objects with key and url
  */
 resolver.define('createJiraIssuesFromActionItems', async (req) => {
-  const { contentId, projectKey, items } = req.payload;
+  const { contentId, projectKey, items, siteUrl, pageUrl } = req.payload;
   
   if (!contentId) {
     throw new Error('contentId is required');
@@ -484,8 +501,80 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
   try {
     const createdIssues = [];
 
-    // Get Confluence base URL from context to build page link
-    const confluenceBaseUrl = req.context?.extension?.baseUrl || '';
+    // Get URLs from payload (preferred) or fallback to context (backward compatibility)
+    // siteUrl: Atlassian site base URL (e.g., https://tenant.atlassian.net)
+    // pageUrl: Full Confluence page URL (e.g., https://tenant.atlassian.net/wiki/spaces/SPACE/pages/12345)
+    let rawSiteUrl = siteUrl
+      || (req.context?.extension?.host ? `https://${req.context.extension.host}` : '')
+      || req.context?.extension?.baseUrl
+      || '';
+    
+    // If we got a CDN URL, try to extract hostname from it (e.g., _hostname_tenant.atlassian.net)
+    if (rawSiteUrl && rawSiteUrl.includes('_hostname_')) {
+      const hostnameMatch = rawSiteUrl.match(/_hostname_([^\/]+)/);
+      if (hostnameMatch && hostnameMatch[1]) {
+        rawSiteUrl = `https://${hostnameMatch[1]}`;
+      }
+    }
+    
+    const effectiveSiteUrl = normalizeSiteUrl(rawSiteUrl);
+    
+    // Get proper Confluence page URL - fetch from API if needed to get space key
+    // If pageUrl is provided but uses invalid format (/wiki/pages/ without space), we'll fetch to get space key
+    let effectivePageUrl = pageUrl;
+    const hasInvalidFormat = effectivePageUrl && effectivePageUrl.includes('/wiki/pages/') && !effectivePageUrl.includes('/wiki/spaces/');
+    const needsSpaceKey = !effectivePageUrl || hasInvalidFormat;
+    
+    if (needsSpaceKey && effectiveSiteUrl && contentId) {
+      // Try to fetch page from Confluence API to get space key for proper URL construction
+      try {
+        const pageResponse = await api.asUser().requestConfluence(
+          route`/wiki/api/v2/pages/${contentId}`,
+          {
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json'
+            }
+          }
+        );
+        
+        if (pageResponse.ok) {
+          const pageData = await pageResponse.json();
+          // Construct proper URL with space key: /wiki/spaces/{spaceKey}/pages/{contentId}
+          // Try multiple possible field names for space identifier
+          const spaceId = pageData.spaceId || 
+                         pageData.space?.id || 
+                         pageData.space?.key ||
+                         (pageData._links?.webui && pageData._links.webui.match(/\/spaces\/([^\/]+)/)?.[1]);
+          
+          if (spaceId) {
+            effectivePageUrl = `${effectiveSiteUrl}/wiki/spaces/${spaceId}/pages/${contentId}`;
+          } else {
+            // Log for debugging if spaceId is not found
+            console.warn('Confluence page API response missing spaceId. Available fields:', Object.keys(pageData).join(', '));
+            // Try alternative URL format: /pages/viewpage.action?pageId={contentId}
+            effectivePageUrl = `${effectiveSiteUrl}/wiki/pages/viewpage.action?pageId=${contentId}`;
+          }
+        } else {
+          const errorText = await pageResponse.text();
+          console.warn(`Failed to fetch Confluence page: ${pageResponse.status} - ${errorText.substring(0, 200)}`);
+        }
+      } catch (e) {
+        // If API call fails, fallback to contentId reference
+        console.warn('Failed to fetch Confluence page for URL construction:', e);
+      }
+      
+      // Final fallback: use contentId reference if we couldn't get space key
+      // Only use fallback if we still don't have a valid URL (API call failed or no spaceId)
+      if (!effectivePageUrl || (effectivePageUrl.includes('/wiki/pages/') && !effectivePageUrl.includes('/wiki/spaces/'))) {
+        effectivePageUrl = contentId ? `Content ID: ${contentId}` : '';
+      }
+    } else if (!effectivePageUrl) {
+      effectivePageUrl = contentId ? `Content ID: ${contentId}` : '';
+    }
+    
+    // If we still don't have a site URL, we'll try to extract it from the Jira API response
+    let fallbackSiteUrl = effectiveSiteUrl;
 
     for (const item of items) {
       if (!item.text || !item.text.trim()) {
@@ -496,8 +585,8 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
       const parsed = parseActionItem(item.text);
       const summary = parsed.text || item.text;
       
-      // Get Confluence page URL for description
-      const pageUrl = confluenceBaseUrl ? `${confluenceBaseUrl}/wiki/spaces/*/pages/${contentId}` : '';
+      // Use provided pageUrl or fallback to Content ID reference
+      const sourceUrl = effectivePageUrl || `Content ID: ${contentId}`;
       
       // Get meeting summary if available
       const meetingKey = getMeetingKey(contentId);
@@ -516,9 +605,8 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
       
       // Build enriched description
       const descriptionParts = [];
-      if (pageUrl) {
-        descriptionParts.push(`Source: ${pageUrl}`);
-      }
+      // Use effectivePageUrl if available, otherwise show Content ID (backward compatible)
+      descriptionParts.push(`Source: ${sourceUrl}`);
       if (meetingSummaryText) {
         descriptionParts.push(`\n\nMeeting Summary:\n${meetingSummaryText}`);
       }
@@ -592,11 +680,32 @@ resolver.define('createJiraIssuesFromActionItems', async (req) => {
 
       const createdIssue = await createResponse.json();
       const issueKey = createdIssue.key;
-      const issueUrl = `${confluenceBaseUrl}/browse/${issueKey}`;
+      
+      // Try to extract site URL from Jira API response if we don't have one
+      // Note: Forge apps use api.atlassian.com proxy, so we can't use the 'self' field directly
+      // Instead, we rely on frontend-provided siteUrl or CDN URL extraction
+      let finalSiteUrl = fallbackSiteUrl;
+      
+      // Only try to extract from 'self' if it's NOT the Forge proxy (api.atlassian.com)
+      if (!finalSiteUrl && createdIssue.self && !createdIssue.self.includes('api.atlassian.com')) {
+        try {
+          const selfUrl = new URL(createdIssue.self);
+          // Extract site from API URL: https://tenant.atlassian.net/rest/api/3/issue/...
+          finalSiteUrl = `${selfUrl.protocol}//${selfUrl.host}`;
+          // Update fallback for subsequent issues in this batch
+          fallbackSiteUrl = finalSiteUrl;
+        } catch (e) {
+          // If parsing fails, keep existing fallback
+        }
+      }
+      
+      // Build Jira issue URL using siteUrl (Jira is on same domain as Confluence)
+      // Fallback to just the key if siteUrl is missing (backward compatible)
+      const issueUrl = finalSiteUrl ? `${finalSiteUrl}/browse/${issueKey}` : issueKey;
 
-      // Add comment with link back to Confluence page (reuse pageUrl from above)
-      const commentBody = pageUrl 
-        ? `Created from SprintScribe AI analysis on Confluence page: ${pageUrl}`
+      // Add comment with link back to Confluence page
+      const commentBody = effectivePageUrl 
+        ? `Created from SprintScribe AI analysis on Confluence page: ${effectivePageUrl}`
         : `Created from SprintScribe AI analysis (Content ID: ${contentId})`;
 
       try {
