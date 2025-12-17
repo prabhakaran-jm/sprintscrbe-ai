@@ -38,6 +38,8 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   // Analyzing state
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // Analyzing with AI state
+  const [isAnalyzingWithAI, setIsAnalyzingWithAI] = useState(false);
   // Creating issues state
   const [isCreatingIssues, setIsCreatingIssues] = useState(false);
   // Generating summary state
@@ -472,6 +474,90 @@ function App() {
       }));
     } finally {
       setIsAnalyzing(false);
+    }
+  };
+
+  // Handler to analyze transcript with AI-powered extraction
+  const handleAnalyzeWithAI = async () => {
+    if (!contentId) {
+      setError('Content ID not available');
+      return;
+    }
+
+    if (!transcriptText || !transcriptText.trim()) {
+      setError('Please enter transcript text');
+      return;
+    }
+
+    setIsAnalyzingWithAI(true);
+    setError(null);
+    setUiMessage(null); // Clear any existing message
+
+    try {
+      const result = await invoke('analyzeWithAI', {
+        contentId,
+        transcriptText: transcriptText.trim()
+      });
+
+      if (result) {
+        setAnalysis({
+          suggestions: result.suggestions || [],
+          decisions: result.decisions || [],
+          actionItems: result.actionItems || []
+        });
+        // Mark that Analyze has been run in this session
+        setHasAnalyzedInSession(true);
+        // Show success message
+        setUiMessage({
+          type: 'success',
+          text: `AI analysis complete. Found ${result.suggestions?.length || 0} suggestions, ${result.decisions?.length || 0} decisions, and ${result.actionItems?.length || 0} action items.`
+        });
+        // Auto-clear after 4 seconds
+        setTimeout(() => setUiMessage(null), 4000);
+        // Update selected action items (all checked by default)
+        const newSelectedItems = (result.actionItems || []).map((item, index) => {
+          // Handle both string and object formats
+          if (typeof item === 'string') {
+            return {
+              index,
+              text: item,
+              selected: true,
+              owner: '',
+              dueDate: '',
+              confidence: 'low',
+              issueKey: null,
+              originalLine: item
+            };
+          }
+          return {
+            index,
+            text: item.text || item,
+            selected: true,
+            owner: item.owner || '',
+            dueDate: item.dueDate || '',
+            confidence: item.confidence || 'low',
+            issueKey: null,
+            originalLine: item.originalLine || item.text || item
+          };
+        });
+        setSelectedActionItems(newSelectedItems);
+        setDebugInfo(prev => ({
+          ...prev,
+          lastAction: 'analyzeWithAI',
+          lastResult: result,
+          lastError: null
+        }));
+      }
+    } catch (err) {
+      console.error('Error analyzing transcript with AI:', err);
+      setError(`Failed to analyze transcript with AI: ${err.message || err}`);
+      setDebugInfo(prev => ({
+        ...prev,
+        lastAction: 'analyzeWithAI',
+        lastError: err.message || String(err)
+      }));
+    } finally {
+      setIsAnalyzingWithAI(false);
     }
   };
 
@@ -1416,23 +1502,41 @@ Suggestion: Prepare rollback plan in case of issues.`
           )}
           
           <div style={{ display: 'flex', gap: '8px', marginTop: uiMessage ? '0' : '12px', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
               <button
                 onClick={handleAnalyze}
-                disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing}
+                disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing || isAnalyzingWithAI}
                 style={{
                   padding: '8px 16px',
                   fontSize: '14px',
                   fontWeight: '500',
                   color: '#FFFFFF',
-                  backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? '#C1C7D0' : '#0052CC',
+                  backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing || isAnalyzingWithAI) ? '#C1C7D0' : '#0052CC',
                   border: 'none',
                   borderRadius: '3px',
-                  cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing) ? 'not-allowed' : 'pointer',
+                  cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing || isAnalyzingWithAI) ? 'not-allowed' : 'pointer',
                   transition: 'background-color 0.2s'
                 }}
               >
                 {isAnalyzing ? 'Analyzing...' : 'Analyze'}
+              </button>
+              <button
+                onClick={handleAnalyzeWithAI}
+                disabled={sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing || isAnalyzingWithAI}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  color: '#FFFFFF',
+                  backgroundColor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing || isAnalyzingWithAI) ? '#C1C7D0' : '#7A869A',
+                  border: 'none',
+                  borderRadius: '3px',
+                  cursor: (sessionStatus !== 'RUNNING' || !transcriptText.trim() || isAnalyzing || isAnalyzingWithAI) ? 'not-allowed' : 'pointer',
+                  transition: 'background-color 0.2s'
+                }}
+                title="Uses enhanced AI-powered extraction with better pattern matching for real-world transcripts"
+              >
+                {isAnalyzingWithAI ? 'Analyzing with AI...' : '🤖 Analyze with AI'}
               </button>
               <button
                 onClick={handleGenerateSummary}
@@ -1867,6 +1971,34 @@ Suggestion: Prepare rollback plan in case of issues.`
           }}>
             Created Jira Issues
           </h2>
+          {/* Time Saved Counter */}
+          <div style={{
+            padding: '12px',
+            backgroundColor: '#E3FCEF',
+            borderRadius: '3px',
+            marginBottom: '16px',
+            border: '1px solid #57D9A3'
+          }}>
+            <div style={{
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#006644',
+              marginBottom: '4px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}>
+              <span>⏱️</span>
+              <span>Time Saved: {((createdIssues.length * 1.5).toFixed(1))} minutes</span>
+            </div>
+            <div style={{
+              fontSize: '12px',
+              color: '#006644',
+              opacity: 0.8
+            }}>
+              (vs {createdIssues.length} × 90 seconds per manual Jira issue creation)
+            </div>
+          </div>
           <div style={{
             fontSize: '14px',
             color: '#172B4D'

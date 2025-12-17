@@ -1,4 +1,5 @@
-import api, { route } from '@forge/api';
+import api, { route, storage } from '@forge/api';
+import { createHash } from 'crypto';
 
 /**
  * Handler for Rovo Agent action: sprintscrbe-pitcrew-run
@@ -50,6 +51,26 @@ export const run = async (req) => {
   // Ensure decisions and actionItems are arrays
   const safeDecisions = Array.isArray(decisions) ? decisions : [];
   const safeActionItems = Array.isArray(actionItems) ? actionItems : [];
+
+  // Idempotency check: prevent duplicate processing of the same transcript
+  try {
+    const storageKey = `sprintscrbe:${confluencePageId}:rovo-processed-hash`;
+    const transcriptHash = createHash('md5').update(transcriptText || '').digest('hex');
+    const previousHash = await storage.get(storageKey);
+
+    if (previousHash === transcriptHash) {
+      return {
+        createdIssueKeys: [],
+        updatedConfluence: false,
+        message: 'This transcript has already been processed. Use "Reset Meeting" in the macro to process again, or modify the transcript to create new issues.'
+      };
+    }
+
+    // Store the hash after successful processing (will be set at the end)
+  } catch (hashError) {
+    // If hash check fails, continue anyway (don't block processing)
+    console.warn('Idempotency check failed, continuing:', hashError);
+  }
 
   try {
     // Get base URL from context
@@ -424,11 +445,30 @@ export const run = async (req) => {
       // Don't fail the entire operation if Confluence update fails
     }
 
-    // Return success result
+    // Store hash after successful processing to prevent duplicates
+    try {
+      const storageKey = `sprintscrbe:${confluencePageId}:rovo-processed-hash`;
+      const transcriptHash = createHash('md5').update(transcriptText || '').digest('hex');
+      await storage.set(storageKey, transcriptHash);
+    } catch (hashError) {
+      // Non-critical: if hash storage fails, log but don't fail the operation
+      console.warn('Failed to store transcript hash:', hashError);
+    }
+
+    // Return success result with richer response
+    // baseUrl is already declared at line 77, reuse it here
     return {
       createdIssueKeys,
+      createdIssueUrls: createdIssueKeys.map(key => baseUrl ? `${baseUrl}/browse/${key}` : ''),
       updatedConfluence,
-      message: `Successfully created ${createdIssueKeys.length} Jira issue(s)${updatedConfluence ? ' and updated Confluence page' : ' (Confluence update failed)'}`
+      confluencePageUrl: baseUrl ? `${baseUrl}/wiki/spaces/*/pages/${confluencePageId}` : '',
+      summary: {
+        totalActionItems: safeActionItems.length,
+        successfulCreations: createdIssueKeys.length,
+        failedCreations: safeActionItems.length - createdIssueKeys.length,
+        decisionsRecorded: safeDecisions.length
+      },
+      message: `✅ Created ${createdIssueKeys.length}/${safeActionItems.length} Jira issue(s)${updatedConfluence ? ' and updated Confluence page' : ' (Confluence update failed)'}`
     };
   } catch (error) {
     console.error('Error in pitcrewRun:', error);

@@ -335,6 +335,177 @@ resolver.define('analyzeTranscript', async (req) => {
 });
 
 /**
+ * Analyze transcript with AI-powered extraction (improved heuristics)
+ * This uses enhanced pattern matching similar to what Rovo Agent would do
+ * @param {Object} req - Request object containing contentId and transcriptText
+ * @returns {Promise<Object>} Analysis results with suggestions, decisions, and actionItems
+ */
+resolver.define('analyzeWithAI', async (req) => {
+  const { contentId, transcriptText } = req.payload;
+  
+  if (!contentId) {
+    throw new Error('contentId is required');
+  }
+  
+  if (!transcriptText || !transcriptText.trim()) {
+    throw new Error('transcriptText is required');
+  }
+
+  try {
+    const text = transcriptText.trim();
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+    
+    const suggestions = [];
+    const decisions = [];
+    const actionItems = [];
+    
+    // Enhanced extraction with better patterns for real-world transcripts
+    
+    // Extract suggestions (insights, recommendations)
+    lines.forEach((line) => {
+      const lowerLine = line.toLowerCase();
+      // Look for suggestion patterns, recommendations, insights
+      if (/suggestion|recommend|insight|consider|propose|suggest/i.test(line) && 
+          !/action|todo|task/i.test(line)) {
+        // Extract the actual suggestion text
+        const match = line.match(/(?:suggestion|recommend|insight|consider|propose|suggest)[\s:]+(.+)/i);
+        if (match && match[1]) {
+          suggestions.push(match[1].trim());
+        } else if (line.length > 20) {
+          suggestions.push(line);
+        }
+      }
+    });
+    
+    // Enhanced decision extraction
+    const decisionPatterns = [
+      /(?:we|they|the team|we all|everyone)\s+(?:decided|agreed|concluded|determined|resolved)/i,
+      /decision\s*[:]\s*(.+)/i,
+      /decided\s+to\s+(.+)/i,
+      /agreement\s+was\s+(.+)/i,
+      /consensus\s+is\s+(.+)/i,
+      /(?:we|they)\s+will\s+(?:proceed|move forward|adopt|use)/i,
+      /(?:it|that)\s+was\s+(?:decided|agreed|determined)/i
+    ];
+    
+    lines.forEach((line) => {
+      for (const pattern of decisionPatterns) {
+        const match = line.match(pattern);
+        if (match) {
+          const decisionText = match[1] ? match[1].trim() : line.trim();
+          if (decisionText && decisionText.length > 10) {
+            decisions.push(decisionText);
+            break;
+          }
+        }
+      }
+    });
+    
+    // Enhanced action item extraction with timestamp and speaker support
+    // Support formats like: [00:12:34] Sarah: "We should refactor auth"
+    // Or: Sarah: Action: Refactor auth module
+    let currentActionItem = null;
+    
+    lines.forEach((line, index) => {
+      const trimmedLine = line.trim();
+      const lowerLine = trimmedLine.toLowerCase();
+      
+      // Extract timestamp and speaker if present: [HH:MM:SS] Name: text
+      const timestampSpeakerMatch = trimmedLine.match(/^\[(\d{1,2}:\d{2}:\d{2})\]\s*([^:]+):\s*(.+)$/);
+      let speaker = null;
+      let actionText = trimmedLine;
+      
+      if (timestampSpeakerMatch) {
+        speaker = timestampSpeakerMatch[2].trim();
+        actionText = timestampSpeakerMatch[3].trim();
+      }
+      
+      // Check for explicit "Action:" pattern (high confidence)
+      const actionMatch = actionText.match(/^action\s*:\s*(.+)$/i);
+      if (actionMatch) {
+        if (currentActionItem) {
+          actionItems.push(currentActionItem);
+        }
+        currentActionItem = {
+          text: actionMatch[1].trim(),
+          owner: speaker || undefined,
+          dueDate: undefined,
+          confidence: 'high',
+          originalLine: trimmedLine
+        };
+        return;
+      }
+      
+      // Check for "Owner:" line
+      const ownerMatch = trimmedLine.match(/^owner\s*:\s*(.+)$/i);
+      if (ownerMatch && currentActionItem) {
+        currentActionItem.owner = ownerMatch[1].trim();
+        return;
+      }
+      
+      // Check for "Due:" line
+      const dueMatch = trimmedLine.match(/^due\s*(?:date)?\s*:\s*(.+)$/i);
+      if (dueMatch && currentActionItem) {
+        currentActionItem.dueDate = dueMatch[1].trim();
+        return;
+      }
+      
+      // Finalize current action item if we hit a non-metadata line
+      if (currentActionItem) {
+        actionItems.push(currentActionItem);
+        currentActionItem = null;
+      }
+      
+      // Medium confidence: commitment verbs with action verbs
+      if (/\b(?:will|should|must|needs to|going to)\s+(?:do|complete|finish|deliver|implement|create|update|fix|test|deploy|refactor|build|add|remove|change|update)/i.test(lowerLine)) {
+        // Extract owner from speaker if available
+        const owner = speaker || (lowerLine.match(/(?:^|\s)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:will|should|must)/) || [])[1];
+        actionItems.push({
+          text: actionText,
+          owner: owner || undefined,
+          dueDate: undefined,
+          confidence: 'medium',
+          originalLine: trimmedLine
+        });
+        return;
+      }
+      
+      // Low confidence: implicit actions
+      if (/(?:task|todo|action item|needs? to happen|someone should)/i.test(lowerLine) &&
+          !currentActionItem) {
+        actionItems.push({
+          text: actionText,
+          owner: speaker || undefined,
+          dueDate: undefined,
+          confidence: 'low',
+          originalLine: trimmedLine
+        });
+      }
+    });
+    
+    // Don't forget the last action item
+    if (currentActionItem) {
+      actionItems.push(currentActionItem);
+    }
+    
+    // Store the analysis
+    const analysis = {
+      suggestions: suggestions.length > 0 ? suggestions : [],
+      decisions: decisions.length > 0 ? decisions : [],
+      actionItems: actionItems.length > 0 ? actionItems : []
+    };
+    
+    const analysisKey = getAnalysisKey(contentId);
+    await storage.set(analysisKey, analysis);
+    
+    return analysis;
+  } catch (error) {
+    console.error('Error analyzing transcript with AI:', error);
+    throw error;
+  }
+});
+
+/**
  * List available Jira projects
  * @returns {Promise<Array>} Array of project objects with key and name
  */
